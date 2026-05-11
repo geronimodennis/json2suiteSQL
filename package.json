@@ -1,0 +1,38 @@
+{
+  "name": "json2suitesql",
+  "version": "1.0.0",
+  "description": "Create SuiteQL strings from JSON-style query objects.",
+  "type": "module",
+  "main": "./dist/jsonToQueryProcessor.js",
+  "module": "./dist/jsonToQueryProcessor.js",
+  "types": "./dist/jsonToQueryProcessor.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/jsonToQueryProcessor.d.ts",
+      "import": "./dist/jsonToQueryProcessor.js",
+      "default": "./dist/jsonToQueryProcessor.js"
+    },
+    "./min": "./dist/jsonToQueryProcessor.min.js"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "jsonToQueryProcessor.ts"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json && terser dist/jsonToQueryProcessor.js --compress --mangle --output dist/jsonToQueryProcessor.min.js --comments false",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "suiteql",
+    "netsuite",
+    "sql",
+    "json"
+  ],
+  "devDependencies": {
+    "terser": "^5.43.1",
+    "typescript": "^5.9.3"
+  }
+}
