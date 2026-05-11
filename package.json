@@ -12,17 +12,24 @@
       "import": "./dist/jsonToQueryProcessor.js",
       "default": "./dist/jsonToQueryProcessor.js"
     },
-    "./min": "./dist/jsonToQueryProcessor.min.js"
+    "./min": "./dist/jsonToQueryProcessor.min.js",
+    "./builder": {
+      "types": "./dist/suiteQLQueryBuilder.d.ts",
+      "import": "./dist/suiteQLQueryBuilder.js",
+      "default": "./dist/suiteQLQueryBuilder.js"
+    },
+    "./builder/min": "./dist/suiteQLQueryBuilder.min.js"
   },
   "files": [
     "dist",
     "docs",
     "README.md",
-    "jsonToQueryProcessor.ts"
+    "jsonToQueryProcessor.ts",
+    "suiteQLQueryBuilder.ts"
   ],
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "npm run clean && tsc -p tsconfig.json && terser dist/jsonToQueryProcessor.js --compress --mangle --output dist/jsonToQueryProcessor.min.js --comments false",
+    "build": "npm run clean && tsc -p tsconfig.json && terser dist/jsonToQueryProcessor.js --compress --mangle --output dist/jsonToQueryProcessor.min.js --comments false && terser dist/suiteQLQueryBuilder.js --compress --mangle --output dist/suiteQLQueryBuilder.min.js --comments false",
     "prepack": "npm run build"
   },
   "keywords": [

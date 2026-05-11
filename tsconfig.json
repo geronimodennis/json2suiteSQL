@@ -12,7 +12,8 @@
     "skipLibCheck": true
   },
   "include": [
-    "jsonToQueryProcessor.ts"
+    "jsonToQueryProcessor.ts",
+    "suiteQLQueryBuilder.ts"
   ],
   "exclude": [
     "dist",
