@@ -162,6 +162,42 @@ const sql = oracleSQL()
 WITH entity_totals AS (SELECT T.entity as entity, SUM(T.foreigntotal) as total FROM transaction T GROUP BY T.entity) SELECT ET.entity as entity, ET.total as total FROM entity_totals ET WHERE ET.total > 0
 ```
 
+## Multiple CTEs
+
+Chain `withCte` calls when a query needs more than one common table expression.
+
+```js
+const salesTotals = oracleSQL()
+  .from("transaction", "T")
+  .select("T.entity", "entity")
+  .selectRaw("SUM(T.foreigntotal)", "salesTotal")
+  .where("T.type", "=", "SalesOrd")
+  .groupBy("T.entity");
+
+const creditTotals = oracleSQL()
+  .from("transaction", "T")
+  .select("T.entity", "entity")
+  .selectRaw("SUM(T.foreigntotal)", "creditTotal")
+  .where("T.type", "=", "CustCred")
+  .groupBy("T.entity");
+
+const sql = oracleSQL()
+  .withCte("sales_totals", salesTotals)
+  .withCte("credit_totals", creditTotals)
+  .from("sales_totals", "S")
+  .leftJoin("credit_totals", "C", "C.entity = S.entity")
+  .select("S.entity", "entity")
+  .select("S.salesTotal", "salesTotal")
+  .selectRaw("COALESCE(C.creditTotal, 0)", "creditTotal")
+  .selectRaw("S.salesTotal - COALESCE(C.creditTotal, 0)", "netTotal")
+  .orderBy("netTotal DESC")
+  .toOracleSQL();
+```
+
+```sql
+WITH sales_totals AS (SELECT T.entity as entity, SUM(T.foreigntotal) as salesTotal FROM transaction T WHERE T.type = 'SalesOrd' GROUP BY T.entity), credit_totals AS (SELECT T.entity as entity, SUM(T.foreigntotal) as creditTotal FROM transaction T WHERE T.type = 'CustCred' GROUP BY T.entity) SELECT S.entity as entity, S.salesTotal as salesTotal, COALESCE(C.creditTotal, 0) as creditTotal, S.salesTotal - COALESCE(C.creditTotal, 0) as netTotal FROM sales_totals S LEFT JOIN credit_totals C ON C.entity = S.entity ORDER BY netTotal DESC
+```
+
 ## Window and Analytic Functions
 
 Use `selectWindow`, `rowNumber`, `rank`, or `denseRank` for `OVER (...)` expressions.
