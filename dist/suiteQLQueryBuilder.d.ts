@@ -1,11 +1,22 @@
 export type SuiteQLGate = 'AND' | 'OR';
 export type SuiteQLDialect = 'suiteql' | 'oracle' | 'ansi';
-export type SuiteQLJoinType = 'JOIN' | 'LEFT JOIN' | 'LEFT OUTER JOIN' | 'RIGHT JOIN' | 'RIGHT OUTER JOIN' | 'INNER JOIN' | 'OUTER JOIN' | 'FULL JOIN' | 'FULL OUTER JOIN' | 'CROSS JOIN';
+export type SuiteQLJoinType = 'JOIN' | 'LEFT JOIN' | 'LEFT OUTER JOIN' | 'RIGHT JOIN' | 'RIGHT OUTER JOIN' | 'INNER JOIN' | 'OUTER JOIN' | 'FULL JOIN' | 'FULL OUTER JOIN' | 'CROSS JOIN' | 'NATURAL JOIN';
 export type SuiteQLSetOperator = 'UNION' | 'UNION ALL' | 'INTERSECT' | 'INTERSECT ALL' | 'MINUS' | 'MINUS ALL' | 'EXCEPT' | 'EXCEPT ALL';
 export type SuiteQLValue = string | number | boolean | bigint | null | Date | SuiteQLRaw | SuiteQLValue[];
 export type SuiteQLQueryInput = SuiteQLQueryBuilder | JsonLikeQueryObject | string;
 export type SuiteQLOrderDirection = 'ASC' | 'DESC';
 export type SuiteQLNullsOrder = 'NULLS FIRST' | 'NULLS LAST';
+export type SuiteQLParamValue = string | number | boolean | null | Date;
+export type SuiteQLNamedParamValue = SuiteQLParamValue | SuiteQLParamValue[];
+export type SuiteQLNamedParams = Record<string, SuiteQLNamedParamValue>;
+export type SuiteQLParamInput = SuiteQLNamedParams | SuiteQLParamValue[];
+type ConditionInput = QueryObject | string | string[];
+type ClauseListInput = string | Array<string | QueryObject> | QueryObject;
+export interface SuiteQLPreparedQuery {
+    query: string;
+    params: SuiteQLParamValue[];
+    paramNames: string[];
+}
 export interface SuiteQLBuilderOptions {
     dialect?: SuiteQLDialect;
 }
@@ -15,7 +26,9 @@ export interface SuiteQLRaw {
 }
 export interface SuiteQLWindowSpec {
     partitionBy?: string | string[];
+    partition?: string | string[];
     orderBy?: string | string[];
+    order?: string | string[];
     frame?: string;
 }
 export interface SuiteQLFetchOptions {
@@ -26,14 +39,14 @@ export interface JsonLikeQueryObject {
     with?: unknown;
     distinct?: boolean;
     all?: boolean;
-    select?: QueryObject;
-    from?: QueryObject;
-    where?: QueryObject | string;
-    groupBy?: string[];
-    having?: QueryObject | string;
+    select?: QueryObject | string[] | string;
+    from?: QueryObject | string;
+    where?: ConditionInput;
+    groupBy?: ClauseListInput;
+    having?: ConditionInput;
     window?: QueryObject | string[];
-    qualify?: QueryObject | string;
-    orderBy?: string[];
+    qualify?: ConditionInput;
+    orderBy?: ClauseListInput;
     offset?: number | string;
     fetch?: number | string | {
         rows: number | string;
@@ -42,8 +55,8 @@ export interface JsonLikeQueryObject {
     };
     limit?: number | string;
     forUpdate?: boolean | string;
-    startWith?: string;
-    connectBy?: string;
+    startWith?: ConditionInput;
+    connectBy?: ConditionInput;
     union?: Array<JsonLikeQueryObject | string>;
     unionAll?: Array<JsonLikeQueryObject | string>;
     intersect?: Array<JsonLikeQueryObject | string>;
@@ -59,13 +72,15 @@ export interface JsonLikeQueryObject {
 }
 type QueryObject = Record<string, unknown>;
 export declare function raw(value: string): SuiteQLRaw;
-export declare function param(): SuiteQLRaw;
+export declare function param(name?: string): SuiteQLRaw;
 export declare function suiteQL(): SuiteQLQueryBuilder;
 export declare function sql(options?: SuiteQLBuilderOptions): SuiteQLQueryBuilder;
 export declare function oracleSQL(): SuiteQLQueryBuilder;
 export declare function suiteQLFromObject(query: JsonLikeQueryObject): SuiteQLQueryBuilder;
 export declare function oracleSQLFromObject(query: JsonLikeQueryObject): SuiteQLQueryBuilder;
 export declare function over(spec?: string | SuiteQLWindowSpec): string;
+export declare function namedParam(name: string): string;
+export declare function prepareSuiteQL(query: string, params?: SuiteQLParamInput): SuiteQLPreparedQuery;
 export declare class SuiteQLQueryBuilder {
     private readonly dialect;
     private selectModifier;
@@ -122,9 +137,9 @@ export declare class SuiteQLQueryBuilder {
     whereRaw(expression: string): this;
     andWhereRaw(expression: string): this;
     orWhereRaw(expression: string): this;
-    whereIn(field: string, values: SuiteQLValue[] | SuiteQLQueryInput): this;
-    orWhereIn(field: string, values: SuiteQLValue[] | SuiteQLQueryInput): this;
-    whereNotIn(field: string, values: SuiteQLValue[] | SuiteQLQueryInput): this;
+    whereIn(field: string, values: SuiteQLValue | SuiteQLQueryInput): this;
+    orWhereIn(field: string, values: SuiteQLValue | SuiteQLQueryInput): this;
+    whereNotIn(field: string, values: SuiteQLValue | SuiteQLQueryInput): this;
     whereBetween(field: string, start: SuiteQLValue, end: SuiteQLValue): this;
     whereNull(field: string): this;
     whereNotNull(field: string): this;
@@ -164,6 +179,9 @@ export declare class SuiteQLQueryBuilder {
     setOperator(type: SuiteQLSetOperator, ...queries: SuiteQLQueryInput[]): this;
     toSQL(): string;
     toOracleSQL(): string;
+    toParameterizedSQL(params?: SuiteQLParamInput): SuiteQLPreparedQuery;
+    toParameterizedSuiteQL(params?: SuiteQLParamInput): SuiteQLPreparedQuery;
+    toParameterizedOracleSQL(params?: SuiteQLParamInput): SuiteQLPreparedQuery;
     clone(): SuiteQLQueryBuilder;
     toSuiteQL(): string;
     toString(): string;
@@ -177,13 +195,19 @@ export declare class SuiteQLQueryBuilder {
     private renderSetQuery;
     private applyCteObject;
     private applyBuilderSelectObject;
+    private applySelectInput;
     private applySelectObject;
+    private applyFromInput;
     private applyFromObject;
     private applyJoinObject;
-    private applyWhereObject;
-    private applyHavingObject;
-    private applyQualifyObject;
+    private applyWhereInput;
+    private applyHavingInput;
+    private applyQualifyInput;
+    private applyStartWithInput;
+    private applyConnectByInput;
+    private applyConditionInput;
     private applyWindowObject;
     private applyConditionObject;
+    private applyConditionValue;
 }
 export {};

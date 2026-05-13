@@ -35,6 +35,15 @@ export interface JsonToSuiteQLQuery {
     gate?: string;
     [key: string]: any;
 }
+export type SuiteQLParamValue = string | number | boolean | null | Date;
+export type SuiteQLNamedParamValue = SuiteQLParamValue | SuiteQLParamValue[];
+export type SuiteQLNamedParams = Record<string, SuiteQLNamedParamValue>;
+export type SuiteQLParamInput = SuiteQLNamedParams | SuiteQLParamValue[];
+export interface SuiteQLPreparedQuery {
+    query: string;
+    params: SuiteQLParamValue[];
+    paramNames: string[];
+}
 type QueryObject = Record<string, any>;
 type ConditionInput = QueryObject | string | string[];
 type ClauseListInput = string | Array<string | QueryObject> | QueryObject;
@@ -49,5 +58,8 @@ interface FetchInput {
     percent?: boolean;
     withTies?: boolean;
 }
-export { jsonToSuiteQL };
+export { jsonToSuiteQL, jsonToSuiteQLWithParams, namedParam, prepareSuiteQL };
 declare function jsonToSuiteQL(jsonQuery?: JsonToSuiteQLQuery): string;
+declare function jsonToSuiteQLWithParams(jsonQuery?: JsonToSuiteQLQuery, params?: SuiteQLParamInput): SuiteQLPreparedQuery;
+declare function prepareSuiteQL(query: string, params?: SuiteQLParamInput): SuiteQLPreparedQuery;
+declare function namedParam(name: string): string;

@@ -58,8 +58,9 @@ const sql = oracleSQL()
 | `suiteQLFromObject(query)` | Convert a JSON-style query object into a chainable SuiteQL builder. |
 | `oracleSQLFromObject(query)` | Convert a JSON-style query object into a chainable Oracle SQL builder. |
 | `raw(value)` | Mark a value as a trusted SQL fragment. |
-| `param()` | Render a `?` placeholder for external parameter binding. |
+| `param(name?)` | Render `?`, or render `:name` when a name is provided. Named parameters can later be converted to positional params. |
 | `over(spec)` | Build an `OVER (...)` analytic/window clause fragment. |
+| `prepareSuiteQL(query, params)` | Convert named placeholders in a SQL string into positional `?` placeholders and an ordered params array. |
 
 ### Select
 
@@ -162,7 +163,93 @@ const sql = oracleSQL()
 | `toSuiteQL()` | `.toSuiteQL()` | Render the final SQL string. |
 | `toSQL()` | `.toSQL()` | Render the final SQL string. |
 | `toOracleSQL()` | `.toOracleSQL()` | Render the final SQL string from an Oracle builder. |
+| `toParameterizedSQL(params)` | `.toParameterizedSQL({ entityId: 123 })` | Render and convert named placeholders to positional params. |
+| `toParameterizedSuiteQL(params)` | `.toParameterizedSuiteQL({ entityId: 123 })` | SuiteQL-named alias for parameterized output. |
+| `toParameterizedOracleSQL(params)` | `.toParameterizedOracleSQL({ entityId: 123 })` | Oracle-named alias for parameterized output. |
 | `toString()` | `.toString()` | Render the final SQL string implicitly. |
+
+## Named Parameters
+
+Use `param("name")` in fluent predicates when you want readable named placeholders, then call `toParameterizedSQL`, `toParameterizedSuiteQL`, or `toParameterizedOracleSQL`.
+
+```js
+const prepared = oracleSQL()
+  .from("transaction", "T")
+  .select("T.id", "id")
+  .where("T.entity", "=", param("entityId"))
+  .andWhere("T.type", "=", param("recordType"))
+  .toParameterizedOracleSQL({
+    entityId: 123,
+    recordType: "SalesOrd"
+  });
+```
+
+```js
+{
+  query: "SELECT T.id as id FROM transaction T WHERE T.entity = ? AND T.type = ?",
+  params: [123, "SalesOrd"],
+  paramNames: ["entityId", "recordType"]
+}
+```
+
+`prepareSuiteQL` can also convert raw SQL strings:
+
+```js
+const prepared = prepareSuiteQL(
+  "SELECT id FROM transaction WHERE entity = :entityId AND type = @recordType",
+  {
+    entityId: 123,
+    recordType: "SalesOrd"
+  }
+);
+```
+
+The scanner ignores placeholders inside quoted strings and SQL comments. If the same named placeholder appears more than once, its value is repeated in the positional `params` array in query order.
+
+Array named parameters expand into multiple positional placeholders wherever the named placeholder appears. Use this for `IN` clauses, function arguments, custom SuiteQL expressions, and any other SQL fragment where multiple positional placeholders are valid.
+
+```js
+const prepared = oracleSQL()
+  .from("item", "I")
+  .select("I.id", "id")
+  .whereIn("I.id", param("ids"))
+  .andWhere("I.itemtype", "=", param("itemType"))
+  .toParameterizedOracleSQL({
+    ids: [1, 2, 3, "id3"],
+    itemType: "InvtPart"
+  });
+```
+
+```js
+{
+  query: "SELECT I.id as id FROM item I WHERE I.id IN (?,?,?,?) AND I.itemtype = ?",
+  params: [1, 2, 3, "id3", "InvtPart"],
+  paramNames: ["ids", "ids", "ids", "ids", "itemType"]
+}
+```
+
+Empty arrays throw an error because SuiteQL cannot execute `IN ()`.
+
+Arrays are not limited to `IN` clauses. The converter replaces the placeholder in place:
+
+```js
+const prepared = oracleSQL()
+  .from("transaction", "T")
+  .selectRaw("CUSTOM_FUNC(:values)", "result")
+  .whereRaw("T.amount BETWEEN :range")
+  .toParameterizedOracleSQL({
+    values: [1, 2, 3],
+    range: [10, 20]
+  });
+```
+
+```js
+{
+  query: "SELECT CUSTOM_FUNC(?,?,?) as result FROM transaction T WHERE T.amount BETWEEN ?,?",
+  params: [1, 2, 3, 10, 20],
+  paramNames: ["values", "values", "values", "range", "range"]
+}
+```
 
 ## Basic Query
 
@@ -509,6 +596,69 @@ const sql = suiteQLFromObject({
   .where("T.entity", "=", param())
   .orderBy("T.trandate DESC")
   .toSuiteQL();
+```
+
+The object importer accepts the same read-only query shape as the JSON processor, including string selects, structured select expressions, joins, `using`, condition arrays, `op` aliases, `groupBy` and `orderBy` objects, hierarchical clauses, set operators, and named parameter shorthands.
+
+```js
+const prepared = suiteQLFromObject({
+  select: {
+    "T.entity": { as: "entity" },
+    expressionRank: {
+      expression: "RANK()",
+      over: {
+        partitionBy: "T.type",
+        orderBy: "SUM(T.foreigntotal) DESC"
+      },
+      as: "rankNo"
+    }
+  },
+  from: {
+    transaction: { as: "T" },
+    leftJoin: {
+      entity: { as: "E", using: ["id"] }
+    }
+  },
+  where: {
+    "T.type": {
+      operator: "IN",
+      value: { param: "types" },
+      gate: "AND"
+    },
+    "T.status": {
+      operator: "=",
+      value: { expression: "'Open'" }
+    }
+  },
+  startWith: {
+    "T.parent": { operator: "=", value: 0 }
+  },
+  connectBy: ["PRIOR T.id = T.parent"],
+  groupBy: {
+    expression: "T.entity",
+    rollup: ["T.type"]
+  },
+  having: {
+    "SUM(T.foreigntotal)": {
+      op: "BETWEEN",
+      value: [10, 1000]
+    }
+  },
+  orderBy: [
+    { field: "rankNo", direction: "DESC", nulls: "NULLS LAST" }
+  ],
+  fetch: { rows: 5, withTies: true }
+}).toParameterizedSuiteQL({
+  types: ["SalesOrd", "CustInvc"]
+});
+```
+
+```js
+{
+  query: "SELECT T.entity as entity, RANK() OVER (PARTITION BY T.type ORDER BY SUM(T.foreigntotal) DESC) as rankNo FROM transaction as T LEFT JOIN entity as E USING (id) WHERE T.type IN (?,?) AND T.status = 'Open' START WITH T.parent = 0 CONNECT BY PRIOR T.id = T.parent GROUP BY T.entity, ROLLUP (T.type) HAVING SUM(T.foreigntotal) BETWEEN 10 AND 1000 ORDER BY rankNo DESC NULLS LAST FETCH FIRST 5 ROWS WITH TIES",
+  params: ["SalesOrd", "CustInvc"],
+  paramNames: ["types", "types"]
+}
 ```
 
 ## Build Output

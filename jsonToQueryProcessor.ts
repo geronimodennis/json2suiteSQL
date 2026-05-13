@@ -36,6 +36,17 @@ export interface JsonToSuiteQLQuery {
     [key: string]: any;
 }
 
+export type SuiteQLParamValue = string | number | boolean | null | Date;
+export type SuiteQLNamedParamValue = SuiteQLParamValue | SuiteQLParamValue[];
+export type SuiteQLNamedParams = Record<string, SuiteQLNamedParamValue>;
+export type SuiteQLParamInput = SuiteQLNamedParams | SuiteQLParamValue[];
+
+export interface SuiteQLPreparedQuery {
+    query: string;
+    params: SuiteQLParamValue[];
+    paramNames: string[];
+}
+
 type QueryObject = Record<string, any>;
 type ConditionInput = QueryObject | string | string[];
 type ClauseListInput = string | Array<string | QueryObject> | QueryObject;
@@ -86,7 +97,7 @@ const READ_ONLY_BLOCKED_KEYS = new Set([
     'UPSERT'
 ]);
 
-export {jsonToSuiteQL};
+export {jsonToSuiteQL, jsonToSuiteQLWithParams, namedParam, prepareSuiteQL};
 
 function jsonToSuiteQL(jsonQuery: JsonToSuiteQLQuery = {}): string {
     if (!isObject(jsonQuery)) return '';
@@ -100,6 +111,27 @@ function jsonToSuiteQL(jsonQuery: JsonToSuiteQLQuery = {}): string {
     const finalClauses = hasSetOperators ? finalClauseProcessor(jsonQuery) : '';
 
     return normalizeWhitespace([withClause, setQuery || queryBlock, finalClauses].filter(Boolean).join(' '));
+}
+
+function jsonToSuiteQLWithParams(jsonQuery: JsonToSuiteQLQuery = {}, params: SuiteQLParamInput = {}): SuiteQLPreparedQuery {
+    return prepareSuiteQL(jsonToSuiteQL(jsonQuery), params);
+}
+
+function prepareSuiteQL(query: string, params: SuiteQLParamInput = {}): SuiteQLPreparedQuery {
+    if (Array.isArray(params)) {
+        return {query, params: [...params], paramNames: []};
+    }
+
+    const prepared = convertNamedParamsToPositional(query, params);
+    return prepared;
+}
+
+function namedParam(name: string): string {
+    if (!isValidParamName(name)) {
+        throw new Error(`Invalid SuiteQL parameter name "${name}". Use letters, numbers, and underscores, starting with a letter or underscore.`);
+    }
+
+    return `:${name}`;
 }
 
 function queryBlockProcessor(jsonQuery: JsonToSuiteQLQuery, includeFinalClauses: boolean): string {
@@ -502,6 +534,7 @@ function hasAnySetOperator(jsonQuery: JsonToSuiteQLQuery): boolean {
 function renderListOrSubquery(value: any): string {
     if (Array.isArray(value)) return `(${value.map(renderConditionValue).join(', ')})`;
     if (isObject(value)) {
+        if (typeof value.param === 'string') return `(${namedParam(value.param)})`;
         const rawValue = util_IdentifyObjectRelName(value);
         if (rawValue && !isQueryLikeObject(value)) return rawValue;
         return `(${jsonToSuiteQL(value)})`;
@@ -512,6 +545,7 @@ function renderListOrSubquery(value: any): string {
 function renderConditionValue(value: any): string {
     if (Array.isArray(value)) return `(${value.map(renderConditionValue).join(', ')})`;
     if (isObject(value)) {
+        if (typeof value.param === 'string') return namedParam(value.param);
         const rawValue = util_IdentifyObjectRelName(value);
         if (rawValue && !isQueryLikeObject(value)) return rawValue;
         return `(${jsonToSuiteQL(value)})`;
@@ -537,6 +571,151 @@ function appendGate(condition: string, gate?: string): string {
     return gate ? `${condition} ${gate}` : condition;
 }
 
+function convertNamedParamsToPositional(query: string, params: SuiteQLNamedParams): SuiteQLPreparedQuery {
+    const output: string[] = [];
+    const positionalParams: SuiteQLParamValue[] = [];
+    const paramNames: string[] = [];
+    let index = 0;
+
+    while (index < query.length) {
+        const char = query[index];
+        const next = query[index + 1];
+
+        if (char === "'") {
+            index = copyQuotedSection(query, index, output, "'");
+            continue;
+        }
+
+        if (char === '"') {
+            index = copyQuotedSection(query, index, output, '"');
+            continue;
+        }
+
+        if (char === '-' && next === '-') {
+            index = copyLineComment(query, index, output);
+            continue;
+        }
+
+        if (char === '/' && next === '*') {
+            index = copyBlockComment(query, index, output);
+            continue;
+        }
+
+        const namedParameter = readNamedParameter(query, index);
+        if (namedParameter) {
+            if (!Object.prototype.hasOwnProperty.call(params, namedParameter.name)) {
+                throw new Error(`Missing value for named parameter :${namedParameter.name}.`);
+            }
+
+            const value = params[namedParameter.name];
+            if (Array.isArray(value)) {
+                if (!value.length) {
+                    throw new Error(`Array parameter :${namedParameter.name} cannot be empty.`);
+                }
+
+                output.push(new Array(value.length).fill('?').join(','));
+                positionalParams.push(...value);
+                paramNames.push(...value.map(() => namedParameter.name));
+            } else {
+                output.push('?');
+                positionalParams.push(value);
+                paramNames.push(namedParameter.name);
+            }
+            index = namedParameter.end;
+            continue;
+        }
+
+        output.push(char);
+        index++;
+    }
+
+    return {
+        query: output.join(''),
+        params: positionalParams,
+        paramNames
+    };
+}
+
+function copyQuotedSection(query: string, start: number, output: string[], quote: "'" | '"'): number {
+    let index = start;
+    output.push(query[index]);
+    index++;
+
+    while (index < query.length) {
+        output.push(query[index]);
+
+        if (query[index] === quote) {
+            if (query[index + 1] === quote) {
+                output.push(query[index + 1]);
+                index += 2;
+                continue;
+            }
+
+            index++;
+            break;
+        }
+
+        index++;
+    }
+
+    return index;
+}
+
+function copyLineComment(query: string, start: number, output: string[]): number {
+    let index = start;
+
+    while (index < query.length) {
+        output.push(query[index]);
+        if (query[index] === '\n') {
+            index++;
+            break;
+        }
+        index++;
+    }
+
+    return index;
+}
+
+function copyBlockComment(query: string, start: number, output: string[]): number {
+    let index = start;
+
+    while (index < query.length) {
+        output.push(query[index]);
+
+        if (query[index] === '*' && query[index + 1] === '/') {
+            output.push(query[index + 1]);
+            index += 2;
+            break;
+        }
+
+        index++;
+    }
+
+    return index;
+}
+
+function readNamedParameter(query: string, start: number): {name: string; end: number} | null {
+    const marker = query[start];
+    if (marker !== ':' && marker !== '@') return null;
+    if (marker === ':' && query[start + 1] === ':') return null;
+
+    const previous = query[start - 1];
+    if (previous && isIdentifierPart(previous)) return null;
+
+    const firstNameChar = query[start + 1];
+    if (!isIdentifierStart(firstNameChar)) return null;
+
+    let end = start + 2;
+    while (end < query.length && isIdentifierPart(query[end])) {
+        end++;
+    }
+
+    return {
+        name: query.slice(start + 1, end),
+        end
+    };
+}
+
 function assertReadOnlyQuery(jsonQuery: JsonToSuiteQLQuery): void {
     for (const key of Object.keys(jsonQuery)) {
         if (READ_ONLY_BLOCKED_KEYS.has(normalizeKey(key))) {
@@ -555,6 +734,18 @@ function normalizeKey(value: string): string {
 
 function isObject(value: any): value is QueryObject {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isValidParamName(name: string): boolean {
+    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
+}
+
+function isIdentifierStart(char: string | undefined): boolean {
+    return !!char && /[A-Za-z_]/.test(char);
+}
+
+function isIdentifierPart(char: string | undefined): boolean {
+    return !!char && /[A-Za-z0-9_]/.test(char);
 }
 
 function isQueryLikeObject(value: QueryObject): boolean {

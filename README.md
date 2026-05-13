@@ -14,6 +14,8 @@ Key advantages:
 - Supports both JSON-object query definitions and fluent LINQ-style query building.
 - Makes complex queries easier to compose from reusable pieces such as CTEs, subqueries, joins, and aggregate builders.
 - Covers practical reporting and search scenarios with grouping, ordering, unions, window functions, row limiting, and Oracle-style clauses.
+- Lets you write readable named placeholders such as `:entityId`, then converts them to SuiteQL positional `?` parameters with the matching `params` array.
+- Lets the LINQ-style builder start from the same JSON query object shape used by `jsonToQueryProcessor.ts`, then continue chaining clauses.
 - Produces plain SQL strings, so the output can be passed to NetSuite SuiteQL APIs, database adapters, logging tools, or tests.
 - Provides minified and unminified JavaScript redistributions plus TypeScript declarations.
 
@@ -71,6 +73,67 @@ Output:
 SELECT T.id as id,T.trandate as transactionDate,BUILTIN.DF(T.status) as status FROM transaction as T WHERE T.type = 'SalesOrd' AND T.entity = ? ORDER BY T.trandate
 ```
 
+## Named Parameters
+
+SuiteQL execution uses positional `?` placeholders. For readability, this library can accept named placeholders and convert them into a positional query plus an ordered `params` array.
+
+```js
+import { jsonToSuiteQLWithParams } from "./dist/jsonToQueryProcessor.js";
+
+const prepared = jsonToSuiteQLWithParams(
+  {
+    select: {
+      "T.id": { as: "id" }
+    },
+    from: {
+      transaction: { as: "T" }
+    },
+    where: {
+      "T.entity": {
+        operator: "=",
+        value: { param: "entityId" },
+        gate: "AND"
+      },
+      "T.type": {
+        operator: "=",
+        value: { param: "recordType" }
+      }
+    }
+  },
+  {
+    entityId: 123,
+    recordType: "SalesOrd"
+  }
+);
+
+console.log(prepared.query);
+console.log(prepared.params);
+```
+
+Output:
+
+```js
+{
+  query: "SELECT T.id as id FROM transaction as T WHERE T.entity = ? AND T.type = ?",
+  params: [123, "SalesOrd"],
+  paramNames: ["entityId", "recordType"]
+}
+```
+
+You can also convert a raw SQL string:
+
+```js
+import { prepareSuiteQL } from "./dist/jsonToQueryProcessor.js";
+
+const prepared = prepareSuiteQL(
+  "SELECT id FROM transaction WHERE entity = :entityId AND type = @recordType",
+  {
+    entityId: 123,
+    recordType: "SalesOrd"
+  }
+);
+```
+
 ## LINQ-Style Builder Usage
 
 ```js
@@ -99,11 +162,14 @@ const sql = oracleSQL()
     },
     "runningTotal"
   )
-  .where("T.entity", "=", param())
+  .where("T.entity", "=", param("entityId"))
   .where("T.foreigntotal", ">", raw("0"))
   .orderByColumn("T.trandate", "DESC", "NULLS LAST")
-  .fetchFirst(10)
-  .toOracleSQL();
+  .fetchFirst(10);
+
+const prepared = sql.toParameterizedOracleSQL({
+  entityId: 123
+});
 ```
 
 ## API
@@ -122,11 +188,67 @@ Supported top-level properties:
 - `having`: aggregate filters after `GROUP BY`.
 - `window`: named window definitions.
 - `offset`, `fetch`, `limit`: row limiting clauses.
-- `groupBy`: array of SuiteQL fields or expressions.
-- `orderBy`: array of SuiteQL fields or expressions.
+- `groupBy`: SuiteQL fields, expressions, `ROLLUP`, `CUBE`, and grouping sets.
+- `orderBy`: SuiteQL fields, expressions, directions, and `NULLS FIRST` / `NULLS LAST`.
 - `union`: array of query objects or raw query strings joined by `UNION`.
 - `unionAll`: array of query objects or raw query strings joined by `UNION ALL`.
 - `intersect`, `minus`, `except`: additional read-only set operators.
+
+### `prepareSuiteQL(query, params)` and `jsonToSuiteQLWithParams(query, params)`
+
+Convert named placeholders to SuiteQL positional parameters.
+
+- `:name` and `@name` are recognized outside quoted strings and SQL comments.
+- Each named placeholder becomes `?`.
+- Array values expand wherever the named placeholder appears, so `IN (:ids)` becomes `IN (?,?,?)` and `MY_FUNC(:values)` becomes `MY_FUNC(?,?,?)`.
+- The returned `params` array follows the placeholder order in the final query string.
+- Repeated names are repeated in the positional array.
+- Empty arrays throw an error.
+- Missing names throw an error.
+
+Array examples:
+
+```js
+const prepared = prepareSuiteQL(
+  "SELECT id FROM item WHERE id IN (:ids) AND itemtype = :itemType",
+  {
+    ids: [1, 2, 3, "id3"],
+    itemType: "InvtPart"
+  }
+);
+```
+
+Output:
+
+```js
+{
+  query: "SELECT id FROM item WHERE id IN (?,?,?,?) AND itemtype = ?",
+  params: [1, 2, 3, "id3", "InvtPart"],
+  paramNames: ["ids", "ids", "ids", "ids", "itemType"]
+}
+```
+
+Arrays are not limited to `IN` clauses. The converter replaces the placeholder in place:
+
+```js
+const prepared = prepareSuiteQL(
+  "SELECT CUSTOM_FUNC(:values) AS result FROM dual WHERE code BETWEEN :range",
+  {
+    values: [1, 2, 3],
+    range: [10, 20]
+  }
+);
+```
+
+Output:
+
+```js
+{
+  query: "SELECT CUSTOM_FUNC(?,?,?) AS result FROM dual WHERE code BETWEEN ?,?",
+  params: [1, 2, 3, 10, 20],
+  paramNames: ["values", "values", "values", "range", "range"]
+}
+```
 
 ### `suiteQL()` and `oracleSQL()`
 

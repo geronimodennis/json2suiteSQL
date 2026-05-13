@@ -27,7 +27,7 @@ const READ_ONLY_BLOCKED_KEYS = new Set([
     'UPDATE',
     'UPSERT'
 ]);
-export { jsonToSuiteQL };
+export { jsonToSuiteQL, jsonToSuiteQLWithParams, namedParam, prepareSuiteQL };
 function jsonToSuiteQL(jsonQuery = {}) {
     if (!isObject(jsonQuery))
         return '';
@@ -38,6 +38,22 @@ function jsonToSuiteQL(jsonQuery = {}) {
     const setQuery = setOperatorProcessor(queryBlock, jsonQuery);
     const finalClauses = hasSetOperators ? finalClauseProcessor(jsonQuery) : '';
     return normalizeWhitespace([withClause, setQuery || queryBlock, finalClauses].filter(Boolean).join(' '));
+}
+function jsonToSuiteQLWithParams(jsonQuery = {}, params = {}) {
+    return prepareSuiteQL(jsonToSuiteQL(jsonQuery), params);
+}
+function prepareSuiteQL(query, params = {}) {
+    if (Array.isArray(params)) {
+        return { query, params: [...params], paramNames: [] };
+    }
+    const prepared = convertNamedParamsToPositional(query, params);
+    return prepared;
+}
+function namedParam(name) {
+    if (!isValidParamName(name)) {
+        throw new Error(`Invalid SuiteQL parameter name "${name}". Use letters, numbers, and underscores, starting with a letter or underscore.`);
+    }
+    return `:${name}`;
 }
 function queryBlockProcessor(jsonQuery, includeFinalClauses) {
     const queryString = [];
@@ -450,6 +466,8 @@ function renderListOrSubquery(value) {
     if (Array.isArray(value))
         return `(${value.map(renderConditionValue).join(', ')})`;
     if (isObject(value)) {
+        if (typeof value.param === 'string')
+            return `(${namedParam(value.param)})`;
         const rawValue = util_IdentifyObjectRelName(value);
         if (rawValue && !isQueryLikeObject(value))
             return rawValue;
@@ -461,6 +479,8 @@ function renderConditionValue(value) {
     if (Array.isArray(value))
         return `(${value.map(renderConditionValue).join(', ')})`;
     if (isObject(value)) {
+        if (typeof value.param === 'string')
+            return namedParam(value.param);
         const rawValue = util_IdentifyObjectRelName(value);
         if (rawValue && !isQueryLikeObject(value))
             return rawValue;
@@ -483,6 +503,126 @@ function renderQueryInput(query) {
 function appendGate(condition, gate) {
     return gate ? `${condition} ${gate}` : condition;
 }
+function convertNamedParamsToPositional(query, params) {
+    const output = [];
+    const positionalParams = [];
+    const paramNames = [];
+    let index = 0;
+    while (index < query.length) {
+        const char = query[index];
+        const next = query[index + 1];
+        if (char === "'") {
+            index = copyQuotedSection(query, index, output, "'");
+            continue;
+        }
+        if (char === '"') {
+            index = copyQuotedSection(query, index, output, '"');
+            continue;
+        }
+        if (char === '-' && next === '-') {
+            index = copyLineComment(query, index, output);
+            continue;
+        }
+        if (char === '/' && next === '*') {
+            index = copyBlockComment(query, index, output);
+            continue;
+        }
+        const namedParameter = readNamedParameter(query, index);
+        if (namedParameter) {
+            if (!Object.prototype.hasOwnProperty.call(params, namedParameter.name)) {
+                throw new Error(`Missing value for named parameter :${namedParameter.name}.`);
+            }
+            const value = params[namedParameter.name];
+            if (Array.isArray(value)) {
+                if (!value.length) {
+                    throw new Error(`Array parameter :${namedParameter.name} cannot be empty.`);
+                }
+                output.push(new Array(value.length).fill('?').join(','));
+                positionalParams.push(...value);
+                paramNames.push(...value.map(() => namedParameter.name));
+            }
+            else {
+                output.push('?');
+                positionalParams.push(value);
+                paramNames.push(namedParameter.name);
+            }
+            index = namedParameter.end;
+            continue;
+        }
+        output.push(char);
+        index++;
+    }
+    return {
+        query: output.join(''),
+        params: positionalParams,
+        paramNames
+    };
+}
+function copyQuotedSection(query, start, output, quote) {
+    let index = start;
+    output.push(query[index]);
+    index++;
+    while (index < query.length) {
+        output.push(query[index]);
+        if (query[index] === quote) {
+            if (query[index + 1] === quote) {
+                output.push(query[index + 1]);
+                index += 2;
+                continue;
+            }
+            index++;
+            break;
+        }
+        index++;
+    }
+    return index;
+}
+function copyLineComment(query, start, output) {
+    let index = start;
+    while (index < query.length) {
+        output.push(query[index]);
+        if (query[index] === '\n') {
+            index++;
+            break;
+        }
+        index++;
+    }
+    return index;
+}
+function copyBlockComment(query, start, output) {
+    let index = start;
+    while (index < query.length) {
+        output.push(query[index]);
+        if (query[index] === '*' && query[index + 1] === '/') {
+            output.push(query[index + 1]);
+            index += 2;
+            break;
+        }
+        index++;
+    }
+    return index;
+}
+function readNamedParameter(query, start) {
+    const marker = query[start];
+    if (marker !== ':' && marker !== '@')
+        return null;
+    if (marker === ':' && query[start + 1] === ':')
+        return null;
+    const previous = query[start - 1];
+    if (previous && isIdentifierPart(previous))
+        return null;
+    const firstNameChar = query[start + 1];
+    if (!isIdentifierStart(firstNameChar))
+        return null;
+    let end = start + 2;
+    while (end < query.length && isIdentifierPart(query[end])) {
+        end++;
+    }
+    return {
+        name: query.slice(start + 1, end),
+        end
+    };
+}
 function assertReadOnlyQuery(jsonQuery) {
     for (const key of Object.keys(jsonQuery)) {
         if (READ_ONLY_BLOCKED_KEYS.has(normalizeKey(key))) {
@@ -498,6 +638,15 @@ function normalizeKey(value) {
 }
 function isObject(value) {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+function isValidParamName(name) {
+    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
+}
+function isIdentifierStart(char) {
+    return !!char && /[A-Za-z_]/.test(char);
+}
+function isIdentifierPart(char) {
+    return !!char && /[A-Za-z0-9_]/.test(char);
 }
 function isQueryLikeObject(value) {
     return [

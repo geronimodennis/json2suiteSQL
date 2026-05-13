@@ -1,8 +1,22 @@
+const READ_ONLY_BLOCKED_KEYS = new Set([
+    'ADD',
+    'ALTER',
+    'CREATE',
+    'DELETE',
+    'DROP',
+    'EDIT',
+    'INSERT',
+    'MERGE',
+    'REMOVE',
+    'TRUNCATE',
+    'UPDATE',
+    'UPSERT'
+]);
 export function raw(value) {
     return Object.freeze({ __suiteQLRaw: true, value });
 }
-export function param() {
-    return raw('?');
+export function param(name) {
+    return raw(name ? namedParam(name) : '?');
 }
 export function suiteQL() {
     return new SuiteQLQueryBuilder();
@@ -21,6 +35,18 @@ export function oracleSQLFromObject(query) {
 }
 export function over(spec = '') {
     return renderOverClause(spec);
+}
+export function namedParam(name) {
+    if (!isValidParamName(name)) {
+        throw new Error(`Invalid SuiteQL parameter name "${name}". Use letters, numbers, and underscores, starting with a letter or underscore.`);
+    }
+    return `:${name}`;
+}
+export function prepareSuiteQL(query, params = {}) {
+    if (Array.isArray(params)) {
+        return { query, params: [...params], paramNames: [] };
+    }
+    return convertNamedParamsToPositional(query, params);
 }
 export class SuiteQLQueryBuilder {
     constructor(options = {}) {
@@ -46,6 +72,7 @@ export class SuiteQLQueryBuilder {
         const builder = new SuiteQLQueryBuilder(options);
         if (!isObject(query))
             return builder;
+        assertReadOnlyQuery(query);
         if (query.with) {
             builder.applyCteObject(query.with);
         }
@@ -56,28 +83,28 @@ export class SuiteQLQueryBuilder {
             builder.selectAll();
         }
         if (query.select) {
-            builder.applySelectObject(query.select);
+            builder.applySelectInput(query.select);
         }
         if (query.from) {
-            builder.applyFromObject(query.from);
+            builder.applyFromInput(query.from);
         }
         if (query.where) {
-            builder.applyWhereObject(query.where);
+            builder.applyWhereInput(query.where);
         }
-        if (Array.isArray(query.groupBy)) {
-            builder.groupBy(...query.groupBy);
+        if (query.groupBy) {
+            builder.groupByClauses.push(...renderClauseListInput(query.groupBy));
         }
         if (query.having) {
-            builder.applyHavingObject(query.having);
+            builder.applyHavingInput(query.having);
         }
         if (query.window) {
             builder.applyWindowObject(query.window);
         }
         if (query.qualify) {
-            builder.applyQualifyObject(query.qualify);
+            builder.applyQualifyInput(query.qualify);
         }
-        if (Array.isArray(query.orderBy)) {
-            builder.orderBy(...query.orderBy);
+        if (query.orderBy) {
+            builder.orderByClauses.push(...renderClauseListInput(query.orderBy));
         }
         if (query.offset !== undefined) {
             builder.offset(query.offset);
@@ -97,10 +124,10 @@ export class SuiteQLQueryBuilder {
             builder.forUpdate(query.forUpdate === true ? undefined : String(query.forUpdate));
         }
         if (query.startWith) {
-            builder.startWith(query.startWith);
+            builder.applyStartWithInput(query.startWith);
         }
         if (query.connectBy) {
-            builder.connectBy(query.connectBy);
+            builder.applyConnectByInput(query.connectBy);
         }
         if (Array.isArray(query.union)) {
             builder.union(...query.union);
@@ -391,6 +418,15 @@ export class SuiteQLQueryBuilder {
     toOracleSQL() {
         return this.toSuiteQL();
     }
+    toParameterizedSQL(params = {}) {
+        return prepareSuiteQL(this.toSuiteQL(), params);
+    }
+    toParameterizedSuiteQL(params = {}) {
+        return this.toParameterizedSQL(params);
+    }
+    toParameterizedOracleSQL(params = {}) {
+        return this.toParameterizedSQL(params);
+    }
     clone() {
         const builder = new SuiteQLQueryBuilder({ dialect: this.dialect });
         builder.selectModifier = this.selectModifier;
@@ -571,27 +607,42 @@ export class SuiteQLQueryBuilder {
             this.select(fieldName);
         }
     }
+    applySelectInput(select) {
+        if (typeof select === 'string') {
+            this.selectRaw(select);
+            return;
+        }
+        if (Array.isArray(select)) {
+            select.forEach((field) => this.select(field));
+            return;
+        }
+        if (isObject(select)) {
+            this.applySelectObject(select);
+        }
+    }
     applySelectObject(select) {
         for (const fieldName in select) {
             const fieldInfo = select[fieldName];
-            const key = fieldName.toUpperCase();
+            const key = normalizeKey(fieldName);
             if (key.indexOf('EXPRESSION') === 0) {
                 if (isObject(fieldInfo)) {
-                    this.selectRaw(readRelName(fieldInfo), readString(fieldInfo, 'as'));
+                    this.selectRaw(renderAnalyticExpression(readRelName(fieldInfo) || fieldName, fieldInfo), readString(fieldInfo, 'as'));
                 }
                 else {
                     this.selectRaw(String(fieldInfo));
                 }
                 continue;
             }
-            if (key.indexOf('SUBQUERY') === 0 && isObject(fieldInfo)) {
-                const alias = readString(fieldInfo, 'as');
-                if (alias)
-                    this.selectSubquery(fieldInfo, alias);
+            if (key.indexOf('SUBQUERY') === 0) {
+                const query = isObject(fieldInfo) && Object.prototype.hasOwnProperty.call(fieldInfo, 'query') ? fieldInfo.query : fieldInfo;
+                this.selectClauses.push({
+                    expression: `(${renderQueryInput(query, { dialect: this.dialect })})`,
+                    alias: isObject(fieldInfo) ? readString(fieldInfo, 'as') : undefined
+                });
                 continue;
             }
             if (isObject(fieldInfo)) {
-                this.select(readRelName(fieldInfo) || fieldName, readString(fieldInfo, 'as'));
+                this.selectRaw(renderAnalyticExpression(readRelName(fieldInfo) || fieldName, fieldInfo), readString(fieldInfo, 'as'));
                 continue;
             }
             if (typeof fieldInfo === 'string') {
@@ -601,18 +652,29 @@ export class SuiteQLQueryBuilder {
             this.select(fieldName);
         }
     }
+    applyFromInput(from) {
+        if (typeof from === 'string') {
+            this.fromRaw(from);
+            return;
+        }
+        if (isObject(from)) {
+            this.applyFromObject(from);
+        }
+    }
     applyFromObject(from) {
         for (const tableName in from) {
             const tableInfo = from[tableName];
-            const key = tableName.toUpperCase();
+            const key = normalizeKey(tableName);
             if (key.indexOf('EXPRESSION') === 0) {
                 this.fromRaw(isObject(tableInfo) ? readRelName(tableInfo) : String(tableInfo));
                 continue;
             }
             if (key.indexOf('SUBQUERY') === 0 && isObject(tableInfo)) {
-                const alias = readString(tableInfo, 'as');
-                if (alias)
-                    this.fromSubquery(tableInfo, alias);
+                const query = Object.prototype.hasOwnProperty.call(tableInfo, 'query') ? tableInfo.query : tableInfo;
+                this.sourceClauses.push({
+                    expression: `(${renderQueryInput(query, { dialect: this.dialect })})`,
+                    alias: readString(tableInfo, 'as')
+                });
                 continue;
             }
             if (isJoinKey(key) && isObject(tableInfo)) {
@@ -633,7 +695,7 @@ export class SuiteQLQueryBuilder {
     applyJoinObject(type, join) {
         for (const tableName in join) {
             const tableInfo = join[tableName];
-            const key = tableName.toUpperCase();
+            const key = normalizeKey(tableName);
             if (key.indexOf('EXPRESSION') === 0) {
                 if (isObject(tableInfo)) {
                     const table = readString(tableInfo, 'table') || readRelName(tableInfo);
@@ -641,7 +703,8 @@ export class SuiteQLQueryBuilder {
                         type,
                         expression: table,
                         alias: readString(tableInfo, 'as'),
-                        on: readString(tableInfo, 'on')
+                        on: readString(tableInfo, 'on'),
+                        using: renderOptionalUsingClause(tableInfo.using)
                     });
                 }
                 else {
@@ -650,11 +713,13 @@ export class SuiteQLQueryBuilder {
                 continue;
             }
             if (key.indexOf('SUBQUERY') === 0 && isObject(tableInfo)) {
+                const query = Object.prototype.hasOwnProperty.call(tableInfo, 'query') ? tableInfo.query : tableInfo;
                 this.joinClauses.push({
                     type,
-                    expression: `(${renderQueryInput(tableInfo, { dialect: this.dialect })})`,
+                    expression: `(${renderQueryInput(query, { dialect: this.dialect })})`,
                     alias: readString(tableInfo, 'as'),
-                    on: readString(tableInfo, 'on')
+                    on: readString(tableInfo, 'on'),
+                    using: renderOptionalUsingClause(tableInfo.using)
                 });
                 continue;
             }
@@ -663,31 +728,45 @@ export class SuiteQLQueryBuilder {
                     type,
                     expression: readRelName(tableInfo) || tableName,
                     alias: readString(tableInfo, 'as'),
-                    on: readString(tableInfo, 'on')
+                    on: readString(tableInfo, 'on'),
+                    using: renderOptionalUsingClause(tableInfo.using)
                 });
             }
         }
     }
-    applyWhereObject(where) {
-        if (typeof where === 'string') {
-            this.whereRaw(where);
-            return;
-        }
-        this.applyConditionObject(where, (gate, expression) => this.addWhere(gate, expression));
+    applyWhereInput(where) {
+        this.applyConditionInput(where, (gate, expression) => this.addWhere(gate, expression));
     }
-    applyHavingObject(having) {
-        if (typeof having === 'string') {
-            this.havingRaw(having);
-            return;
-        }
-        this.applyConditionObject(having, (gate, expression) => this.addHaving(gate, expression));
+    applyHavingInput(having) {
+        this.applyConditionInput(having, (gate, expression) => this.addHaving(gate, expression));
     }
-    applyQualifyObject(qualify) {
-        if (typeof qualify === 'string') {
-            this.qualifyRaw(qualify);
+    applyQualifyInput(qualify) {
+        this.applyConditionInput(qualify, (gate, expression) => this.addQualify(gate, expression));
+    }
+    applyStartWithInput(startWith) {
+        this.applyConditionInput(startWith, (gate, expression) => {
+            this.startWithClauses.push({ gate, expression });
+            return this;
+        });
+    }
+    applyConnectByInput(connectBy) {
+        this.applyConditionInput(connectBy, (gate, expression) => {
+            this.connectByClauses.push({ gate, expression });
+            return this;
+        });
+    }
+    applyConditionInput(input, add) {
+        if (typeof input === 'string') {
+            add('AND', input.trim());
             return;
         }
-        this.applyConditionObject(qualify, (gate, expression) => this.addQualify(gate, expression));
+        if (Array.isArray(input)) {
+            add('AND', input.join(' '));
+            return;
+        }
+        if (isObject(input)) {
+            this.applyConditionObject(input, add);
+        }
     }
     applyWindowObject(window) {
         if (Array.isArray(window)) {
@@ -711,13 +790,14 @@ export class SuiteQLQueryBuilder {
     applyConditionObject(where, add) {
         for (const fieldName in where) {
             const fieldInfo = where[fieldName];
-            const key = fieldName.toUpperCase();
+            const key = normalizeKey(fieldName);
             if (key.indexOf('EXPRESSION') === 0) {
                 add('AND', String(fieldInfo));
                 continue;
             }
-            if (key.indexOf('SUBQUERY') === 0 && isObject(fieldInfo)) {
-                add('AND', `(${renderQueryInput(fieldInfo, { dialect: this.dialect })})`);
+            if (key.indexOf('SUBQUERY') === 0) {
+                const query = isObject(fieldInfo) && Object.prototype.hasOwnProperty.call(fieldInfo, 'query') ? fieldInfo.query : fieldInfo;
+                add('AND', `(${renderQueryInput(query, { dialect: this.dialect })})`);
                 continue;
             }
             if (key.indexOf('EXISTS') === 0) {
@@ -728,16 +808,38 @@ export class SuiteQLQueryBuilder {
                 add(readGate(fieldInfo), `NOT EXISTS ${renderExistsInput(fieldInfo, this.dialect)}`);
                 continue;
             }
+            if (!isObject(fieldInfo)) {
+                add('AND', `${fieldName} ${String(fieldInfo)}`.trim());
+                continue;
+            }
             if (isObject(fieldInfo)) {
+                const rawValue = readString(fieldInfo, 'raw');
+                if (rawValue) {
+                    add(readGate(fieldInfo), rawValue);
+                    continue;
+                }
                 const field = readRelName(fieldInfo) || fieldName;
-                const operator = readString(fieldInfo, 'operator');
+                const operator = readString(fieldInfo, 'operator') || readString(fieldInfo, 'op');
                 const value = Object.prototype.hasOwnProperty.call(fieldInfo, 'value')
-                    ? raw(String(fieldInfo.value))
+                    ? this.applyConditionValue(fieldInfo.value)
                     : undefined;
                 const condition = operator ? buildPredicate(field, operator, value) : field;
                 add(readGate(fieldInfo), condition);
             }
         }
+    }
+    applyConditionValue(value) {
+        if (isObject(value)) {
+            const paramName = readString(value, 'param');
+            if (paramName)
+                return param(paramName);
+            const rawValue = readRelName(value);
+            if (rawValue && !isQueryLikeObject(value))
+                return raw(rawValue);
+            if (isQueryLikeObject(value))
+                return raw(renderQueryInput(value, { dialect: this.dialect }));
+        }
+        return value;
     }
 }
 function renderCteClause(clause, dialect) {
@@ -766,6 +868,8 @@ function renderJoinClause(clause, dialect) {
     }
     if (clause.on)
         parts.push('ON', clause.on);
+    if (clause.using)
+        parts.push('USING', clause.using);
     return parts.join(' ');
 }
 function renderWhereClause(clause, index) {
@@ -773,6 +877,11 @@ function renderWhereClause(clause, index) {
 }
 function renderWindowClause(clause) {
     return `${clause.name} AS (${renderWindowSpec(clause.spec)})`;
+}
+function renderAnalyticExpression(expression, fieldInfo) {
+    if (!Object.prototype.hasOwnProperty.call(fieldInfo, 'over'))
+        return expression;
+    return `${expression} ${renderOverClause(fieldInfo.over)}`;
 }
 function renderQueryInput(input, options = {}) {
     if (typeof input === 'string')
@@ -784,13 +893,17 @@ function renderQueryInput(input, options = {}) {
 function renderExistsInput(input, dialect) {
     if (typeof input === 'string')
         return input.trim();
-    if (isObject(input))
-        return `(${renderQueryInput(input, { dialect })})`;
+    if (isObject(input)) {
+        const query = Object.prototype.hasOwnProperty.call(input, 'query') ? input.query : input;
+        return `(${renderQueryInput(query, { dialect })})`;
+    }
     return String(input);
 }
 function renderListOrSubquery(input, dialect) {
     if (Array.isArray(input))
         return formatValue(input);
+    if (isRaw(input))
+        return `(${input.value})`;
     if (input instanceof SuiteQLQueryBuilder || isObject(input))
         return `(${renderQueryInput(input, { dialect })})`;
     return `(${String(input).trim()})`;
@@ -799,8 +912,9 @@ function renderWindowSpec(spec) {
     if (typeof spec === 'string')
         return spec.trim();
     const parts = [];
-    const partitionBy = flattenOptionalStrings(spec.partitionBy);
-    const orderBy = flattenOptionalStrings(spec.orderBy);
+    const extendedSpec = spec;
+    const partitionBy = flattenOptionalStrings(extendedSpec.partitionBy || extendedSpec.partition);
+    const orderBy = flattenOptionalStrings(extendedSpec.orderBy || extendedSpec.order);
     if (partitionBy.length) {
         parts.push('PARTITION BY', partitionBy.join(', '));
     }
@@ -825,10 +939,210 @@ function renderOverClause(spec) {
     }
     return `OVER (${renderWindowSpec(spec)})`;
 }
+function convertNamedParamsToPositional(query, params) {
+    const output = [];
+    const positionalParams = [];
+    const paramNames = [];
+    let index = 0;
+    while (index < query.length) {
+        const char = query[index];
+        const next = query[index + 1];
+        if (char === "'") {
+            index = copyQuotedSection(query, index, output, "'");
+            continue;
+        }
+        if (char === '"') {
+            index = copyQuotedSection(query, index, output, '"');
+            continue;
+        }
+        if (char === '-' && next === '-') {
+            index = copyLineComment(query, index, output);
+            continue;
+        }
+        if (char === '/' && next === '*') {
+            index = copyBlockComment(query, index, output);
+            continue;
+        }
+        const namedParameter = readNamedParameter(query, index);
+        if (namedParameter) {
+            if (!Object.prototype.hasOwnProperty.call(params, namedParameter.name)) {
+                throw new Error(`Missing value for named parameter :${namedParameter.name}.`);
+            }
+            const value = params[namedParameter.name];
+            if (Array.isArray(value)) {
+                if (!value.length) {
+                    throw new Error(`Array parameter :${namedParameter.name} cannot be empty.`);
+                }
+                output.push(new Array(value.length).fill('?').join(','));
+                positionalParams.push(...value);
+                paramNames.push(...value.map(() => namedParameter.name));
+            }
+            else {
+                output.push('?');
+                positionalParams.push(value);
+                paramNames.push(namedParameter.name);
+            }
+            index = namedParameter.end;
+            continue;
+        }
+        output.push(char);
+        index++;
+    }
+    return {
+        query: output.join(''),
+        params: positionalParams,
+        paramNames
+    };
+}
+function copyQuotedSection(query, start, output, quote) {
+    let index = start;
+    output.push(query[index]);
+    index++;
+    while (index < query.length) {
+        output.push(query[index]);
+        if (query[index] === quote) {
+            if (query[index + 1] === quote) {
+                output.push(query[index + 1]);
+                index += 2;
+                continue;
+            }
+            index++;
+            break;
+        }
+        index++;
+    }
+    return index;
+}
+function copyLineComment(query, start, output) {
+    let index = start;
+    while (index < query.length) {
+        output.push(query[index]);
+        if (query[index] === '\n') {
+            index++;
+            break;
+        }
+        index++;
+    }
+    return index;
+}
+function copyBlockComment(query, start, output) {
+    let index = start;
+    while (index < query.length) {
+        output.push(query[index]);
+        if (query[index] === '*' && query[index + 1] === '/') {
+            output.push(query[index + 1]);
+            index += 2;
+            break;
+        }
+        index++;
+    }
+    return index;
+}
+function readNamedParameter(query, start) {
+    const marker = query[start];
+    if (marker !== ':' && marker !== '@')
+        return null;
+    if (marker === ':' && query[start + 1] === ':')
+        return null;
+    const previous = query[start - 1];
+    if (previous && isIdentifierPart(previous))
+        return null;
+    const firstNameChar = query[start + 1];
+    if (!isIdentifierStart(firstNameChar))
+        return null;
+    let end = start + 2;
+    while (end < query.length && isIdentifierPart(query[end])) {
+        end++;
+    }
+    return {
+        name: query.slice(start + 1, end),
+        end
+    };
+}
 function buildPredicate(field, operator, value) {
     if (value === undefined)
         return `${field} ${operator}`;
+    const normalizedOperator = operator.trim().toUpperCase();
+    if (normalizedOperator === 'BETWEEN' && Array.isArray(value) && value.length >= 2) {
+        return `${field} BETWEEN ${formatValue(value[0])} AND ${formatValue(value[1])}`;
+    }
+    if ((normalizedOperator === 'IN' || normalizedOperator === 'NOT IN') && isRaw(value)) {
+        return `${field} ${operator} (${formatValue(value)})`;
+    }
     return `${field} ${operator} ${formatValue(value)}`;
+}
+function renderClauseListInput(input) {
+    const rendered = renderClauseListExpression(input);
+    return rendered ? [rendered] : [];
+}
+function renderClauseListExpression(input) {
+    if (!input)
+        return '';
+    if (typeof input === 'string')
+        return input.trim();
+    if (Array.isArray(input))
+        return input.map(renderClauseListItem).filter(Boolean).join(', ');
+    if (!isObject(input))
+        return '';
+    const clauses = [];
+    if (input.expression)
+        clauses.push(String(input.expression));
+    if (input.rollup)
+        clauses.push(`ROLLUP (${renderClauseListValue(input.rollup)})`);
+    if (input.cube)
+        clauses.push(`CUBE (${renderClauseListValue(input.cube)})`);
+    if (input.groupingSets)
+        clauses.push(`GROUPING SETS (${renderGroupingSets(input.groupingSets)})`);
+    for (const key in input) {
+        if (['expression', 'rollup', 'cube', 'groupingSets'].includes(key))
+            continue;
+        const value = input[key];
+        if (isObject(value))
+            clauses.push(renderOrderByItem(key, value));
+        else if (value)
+            clauses.push(`${key} ${String(value)}`.trim());
+        else
+            clauses.push(key);
+    }
+    return clauses.filter(Boolean).join(', ');
+}
+function renderClauseListItem(item) {
+    if (typeof item === 'string')
+        return item;
+    if (!isObject(item))
+        return '';
+    if (item.expression)
+        return String(item.expression);
+    if (item.field)
+        return renderOrderByItem(String(item.field), item);
+    return '';
+}
+function renderClauseListValue(input) {
+    if (Array.isArray(input))
+        return input.map((item) => String(item)).join(', ');
+    return String(input);
+}
+function renderGroupingSets(input) {
+    if (!Array.isArray(input))
+        return String(input);
+    return input
+        .map((set) => (Array.isArray(set) ? `(${set.map((item) => String(item)).join(', ')})` : `(${String(set)})`))
+        .join(', ');
+}
+function renderOrderByItem(field, value) {
+    const expression = String(value.expression || value.field || field);
+    return [expression, value.direction, value.nulls].filter(Boolean).map((item) => String(item)).join(' ');
+}
+function renderOptionalUsingClause(value) {
+    if (value === undefined || value === null)
+        return undefined;
+    return renderUsingClause(value);
+}
+function renderUsingClause(value) {
+    if (Array.isArray(value))
+        return `(${value.map((item) => String(item)).join(', ')})`;
+    const rendered = String(value).trim();
+    return rendered.startsWith('(') ? rendered : `(${rendered})`;
 }
 function formatValue(value) {
     if (isRaw(value))
@@ -866,6 +1180,41 @@ function isRaw(value) {
 function isObject(value) {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
+function isQueryLikeObject(value) {
+    return [
+        'with',
+        'select',
+        'from',
+        'where',
+        'startWith',
+        'connectBy',
+        'groupBy',
+        'having',
+        'window',
+        'qualify',
+        'orderBy',
+        'offset',
+        'fetch',
+        'limit',
+        'union',
+        'unionAll',
+        'intersect',
+        'intersectAll',
+        'minus',
+        'minusAll',
+        'except',
+        'exceptAll'
+    ].some((key) => Object.prototype.hasOwnProperty.call(value, key));
+}
+function isValidParamName(name) {
+    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
+}
+function isIdentifierStart(char) {
+    return !!char && /[A-Za-z_]/.test(char);
+}
+function isIdentifierPart(char) {
+    return !!char && /[A-Za-z0-9_]/.test(char);
+}
 function readString(obj, key) {
     const value = obj[key];
     return typeof value === 'string' && value ? value : undefined;
@@ -895,7 +1244,8 @@ function isJoinKey(key) {
         key === 'OUTERJOIN' ||
         key === 'FULLJOIN' ||
         key === 'FULLOUTERJOIN' ||
-        key === 'CROSSJOIN');
+        key === 'CROSSJOIN' ||
+        key === 'NATURALJOIN');
 }
 function toJoinType(key) {
     switch (key) {
@@ -919,9 +1269,21 @@ function toJoinType(key) {
             return 'FULL OUTER JOIN';
         case 'CROSSJOIN':
             return 'CROSS JOIN';
+        case 'NATURALJOIN':
+            return 'NATURAL JOIN';
         default:
             return 'JOIN';
     }
+}
+function assertReadOnlyQuery(query) {
+    for (const key of Object.keys(query)) {
+        if (READ_ONLY_BLOCKED_KEYS.has(normalizeKey(key))) {
+            throw new Error(`SuiteQL is read-only. Unsupported clause "${key}" was provided.`);
+        }
+    }
+}
+function normalizeKey(value) {
+    return value.replace(/[\s_-]/g, '').toUpperCase();
 }
 function normalizeWhitespace(value) {
     return value.replace(/\s+/g, ' ').trim();

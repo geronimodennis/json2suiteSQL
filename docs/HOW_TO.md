@@ -222,6 +222,194 @@ const sql = jsonToSuiteQL({
 SELECT T.id as id FROM transaction as T WHERE T.type = 'SalesOrd' AND T.entity = ?
 ```
 
+## Named Parameters
+
+NetSuite SuiteQL execution uses positional `?` placeholders. Use named placeholders while building a query, then call `prepareSuiteQL` or `jsonToSuiteQLWithParams` to convert them into positional parameters.
+
+```js
+import { jsonToSuiteQLWithParams } from "../dist/jsonToQueryProcessor.js";
+
+const prepared = jsonToSuiteQLWithParams(
+  {
+    select: {
+      "T.id": { as: "id" },
+      "T.tranid": { as: "documentNumber" }
+    },
+    from: {
+      transaction: { as: "T" }
+    },
+    where: {
+      "T.entity": {
+        operator: "=",
+        value: { param: "entityId" },
+        gate: "AND"
+      },
+      "T.type": {
+        operator: "=",
+        value: { param: "recordType" }
+      }
+    }
+  },
+  {
+    entityId: 123,
+    recordType: "SalesOrd"
+  }
+);
+```
+
+```js
+{
+  query: "SELECT T.id as id, T.tranid as documentNumber FROM transaction as T WHERE T.entity = ? AND T.type = ?",
+  params: [123, "SalesOrd"],
+  paramNames: ["entityId", "recordType"]
+}
+```
+
+Raw SQL strings can use `:name` or `@name` placeholders:
+
+```js
+import { prepareSuiteQL } from "../dist/jsonToQueryProcessor.js";
+
+const prepared = prepareSuiteQL(
+  "SELECT id FROM transaction WHERE entity = :entityId AND type = @recordType",
+  {
+    entityId: 123,
+    recordType: "SalesOrd"
+  }
+);
+```
+
+Repeated names are repeated in the positional array:
+
+```js
+prepareSuiteQL(
+  "SELECT :value AS first_value, :value AS second_value",
+  {
+    value: 10
+  }
+);
+```
+
+```js
+{
+  query: "SELECT ? AS first_value, ? AS second_value",
+  params: [10, 10],
+  paramNames: ["value", "value"]
+}
+```
+
+Array named parameters expand into multiple positional placeholders wherever the named placeholder appears, and they are flattened into `params` left-to-right. This is useful for `IN` clauses, function arguments, custom SuiteQL expressions, and any other SQL fragment where multiple positional placeholders are valid.
+
+```js
+prepareSuiteQL(
+  "SELECT id FROM item WHERE id IN (:ids) AND itemtype = :itemType",
+  {
+    ids: [1, 2, 3, "id3"],
+    itemType: "InvtPart"
+  }
+);
+```
+
+```js
+{
+  query: "SELECT id FROM item WHERE id IN (?,?,?,?) AND itemtype = ?",
+  params: [1, 2, 3, "id3", "InvtPart"],
+  paramNames: ["ids", "ids", "ids", "ids", "itemType"]
+}
+```
+
+The same pattern works from object queries:
+
+```js
+const prepared = jsonToSuiteQLWithParams(
+  {
+    select: {
+      id: { as: "id" }
+    },
+    from: {
+      item: {}
+    },
+    where: {
+      id: {
+        operator: "IN",
+        value: { param: "ids" }
+      }
+    }
+  },
+  {
+    ids: [1, 2, 3, "id3"]
+  }
+);
+```
+
+```js
+{
+  query: "SELECT id as id FROM item WHERE id IN (?,?,?,?)",
+  params: [1, 2, 3, "id3"],
+  paramNames: ["ids", "ids", "ids", "ids"]
+}
+```
+
+The LINQ-style builder can load the same object shape and still use named parameter output:
+
+```js
+import { suiteQLFromObject } from "../dist/suiteQLQueryBuilder.js";
+
+const prepared = suiteQLFromObject({
+  select: {
+    id: { as: "id" },
+    itemid: { as: "sku" }
+  },
+  from: {
+    item: { as: "I" }
+  },
+  where: {
+    id: {
+      operator: "IN",
+      value: { param: "ids" },
+      gate: "AND"
+    },
+    itemtype: {
+      operator: "=",
+      value: { param: "itemType" }
+    }
+  }
+}).toParameterizedSuiteQL({
+  ids: [1, 2, 3, "id3"],
+  itemType: "InvtPart"
+});
+```
+
+```js
+{
+  query: "SELECT id as id, itemid as sku FROM item as I WHERE id IN (?,?,?,?) AND itemtype = ?",
+  params: [1, 2, 3, "id3", "InvtPart"],
+  paramNames: ["ids", "ids", "ids", "ids", "itemType"]
+}
+```
+
+Empty arrays throw an error because SuiteQL cannot execute `IN ()`.
+
+Arrays are not limited to `IN` clauses. The converter replaces the placeholder in place:
+
+```js
+prepareSuiteQL(
+  "SELECT CUSTOM_FUNC(:values) AS result FROM dual WHERE code BETWEEN :range",
+  {
+    values: [1, 2, 3],
+    range: [10, 20]
+  }
+);
+```
+
+```js
+{
+  query: "SELECT CUSTOM_FUNC(?,?,?) AS result FROM dual WHERE code BETWEEN ?,?",
+  params: [1, 2, 3, 10, 20],
+  paramNames: ["values", "values", "values", "range", "range"]
+}
+```
+
 ## Structured WHERE Conditions
 
 Use `operator`, `value`, and `gate`.
