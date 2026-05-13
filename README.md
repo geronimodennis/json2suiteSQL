@@ -19,6 +19,41 @@ Key advantages:
 - Produces plain SQL strings, so the output can be passed to NetSuite SuiteQL APIs, database adapters, logging tools, or tests.
 - Provides minified and unminified JavaScript redistributions plus TypeScript declarations.
 
+As of May 13, 2026, native SuiteQL parameter binding is still positional: [Oracle's SuiteQL.params docs](https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_157960427733.html) describe query placeholders as question marks (`?`) and require the values in `params` to match the order those placeholders appear in the query string. That old-school positional style works, but it gets messy to maintain when queries have many conditions, repeated values, optional filters, or array values.
+
+This library lets you write readable named parameters while still producing the positional output SuiteQL expects:
+
+```js
+import { prepareSuiteQL } from "./dist/jsonToQueryProcessor.js";
+
+const prepared = prepareSuiteQL(
+  `SELECT id, tranid
+   FROM transaction
+   WHERE entity = :entityId
+     AND type IN (:recordTypes)
+     AND status = :status`,
+  {
+    entityId: 123,
+    recordTypes: ["SalesOrd", "CustInvc"],
+    status: "Pending Fulfillment"
+  }
+);
+```
+
+Output:
+
+```js
+{
+  query: `SELECT id, tranid
+   FROM transaction
+   WHERE entity = ?
+     AND type IN (?,?)
+     AND status = ?`,
+  params: [123, "SalesOrd", "CustInvc", "Pending Fulfillment"],
+  paramNames: ["entityId", "recordTypes", "recordTypes", "status"]
+}
+```
+
 It is intentionally lightweight: it builds SQL strings from trusted field, table, and expression fragments that you provide. It does not try to validate your NetSuite schema or replace parameter binding in your execution layer.
 
 ## Installation
