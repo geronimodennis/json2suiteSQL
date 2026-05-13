@@ -307,6 +307,10 @@ See [docs/HOW_TO.md](docs/HOW_TO.md) for detailed examples covering each support
 
 For the chainable LINQ-style source version, including its syntax reference, Oracle SQL query specification support, CTEs, analytic/window functions, grouping, ordering, set operators, subqueries, and joins, see [docs/QUERY_BUILDER.md](docs/QUERY_BUILDER.md).
 
+## License
+
+MIT License. Copyright (c) 2026 Dennis Geronimo.
+
 ## Notes
 
 This library assembles SuiteQL fragments that you provide. It does not validate table names, escape values, or bind parameters. Use `?` placeholders for values that should be bound by the NetSuite API or your database adapter.
