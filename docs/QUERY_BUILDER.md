@@ -30,6 +30,140 @@ The builder is intended to cover the common SQL query specification surface used
 - `ORDER BY`, `NULLS FIRST`, `NULLS LAST`, `OFFSET`, `FETCH FIRST/NEXT`, and `FOR UPDATE`.
 - `UNION`, `UNION ALL`, `INTERSECT`, `INTERSECT ALL`, `MINUS`, `MINUS ALL`, `EXCEPT`, and `EXCEPT ALL`.
 
+## LINQ-Style Syntax Reference
+
+The builder is chainable: each method returns the same builder instance, so calls can be composed in SQL clause order.
+
+```js
+const sql = oracleSQL()
+  .withCte("totals", totalsQuery)
+  .from("transaction", "T")
+  .leftJoin("entity", "E", "E.id = T.entity")
+  .select("T.id", "id")
+  .where("T.entity", "=", param())
+  .groupBy("T.entity")
+  .havingRaw("SUM(T.foreigntotal) > 0")
+  .orderBy("T.trandate DESC")
+  .fetchFirst(10)
+  .toOracleSQL();
+```
+
+### Entry Points
+
+| Method | Purpose |
+| --- | --- |
+| `suiteQL()` | Start a SuiteQL-style query builder. |
+| `oracleSQL()` | Start an Oracle-style query builder. Table aliases render without `AS`. |
+| `sql({ dialect })` | Start a builder with an explicit dialect: `suiteql`, `oracle`, or `ansi`. |
+| `suiteQLFromObject(query)` | Convert a JSON-style query object into a chainable SuiteQL builder. |
+| `oracleSQLFromObject(query)` | Convert a JSON-style query object into a chainable Oracle SQL builder. |
+| `raw(value)` | Mark a value as a trusted SQL fragment. |
+| `param()` | Render a `?` placeholder for external parameter binding. |
+| `over(spec)` | Build an `OVER (...)` analytic/window clause fragment. |
+
+### Select
+
+| Method | Syntax | Output Intent |
+| --- | --- | --- |
+| `select(field, alias?)` | `.select("T.id", "id")` | Select one field with an optional alias. |
+| `select(fields)` | `.select({ "T.id": "id", "T.tranid": "docNo" })` | Select multiple fields from an object map. |
+| `selectAs(expression, alias)` | `.selectAs("T.id", "id")` | Alias an expression. |
+| `selectRaw(expression, alias?)` | `.selectRaw("SUM(T.total)", "total")` | Add a raw select expression. |
+| `selectSubquery(query, alias)` | `.selectSubquery(lineCount, "lineCount")` | Add a scalar subquery in the select list. |
+| `selectWindow(expression, spec, alias?)` | `.selectWindow("SUM(T.total)", { partitionBy: "T.entity" }, "totalByEntity")` | Add an analytic/window expression. |
+| `rowNumber(alias, spec?)` | `.rowNumber("rn", { orderBy: "T.id" })` | Add `ROW_NUMBER() OVER (...)`. |
+| `rank(alias, spec?)` | `.rank("rankNo", { orderBy: "T.total DESC" })` | Add `RANK() OVER (...)`. |
+| `denseRank(alias, spec?)` | `.denseRank("denseRankNo", { orderBy: "T.total DESC" })` | Add `DENSE_RANK() OVER (...)`. |
+| `distinct()` / `selectDistinct()` | `.distinct()` | Render `SELECT DISTINCT`. |
+| `selectAll()` | `.selectAll()` | Render `SELECT ALL`. |
+
+### Sources and Joins
+
+| Method | Syntax | Output Intent |
+| --- | --- | --- |
+| `from(source, alias?)` | `.from("transaction", "T")` | Add a table or source. |
+| `fromRaw(expression)` | `.fromRaw("transaction T")` | Add a raw source fragment. |
+| `fromSubquery(query, alias)` | `.fromSubquery(totals, "T")` | Add a subquery source. |
+| `join(source, aliasOrOn?, on?)` | `.join("entity", "E", "E.id = T.entity")` | Add a generic join. |
+| `leftJoin(source, aliasOrOn?, on?)` | `.leftJoin("entity", "E", "E.id = T.entity")` | Add a left join. |
+| `rightJoin(source, aliasOrOn?, on?)` | `.rightJoin("entity", "E", "E.id = T.entity")` | Add a right join. |
+| `innerJoin(source, aliasOrOn?, on?)` | `.innerJoin("currency", "C", "C.id = T.currency")` | Add an inner join. |
+| `outerJoin(source, aliasOrOn?, on?)` | `.outerJoin("other_table", "O", "O.id = T.id")` | Add an outer join. |
+| `fullJoin(source, aliasOrOn?, on?)` | `.fullJoin("budget", "B", "B.entity = T.entity")` | Add a full join. |
+| `fullOuterJoin(source, aliasOrOn?, on?)` | `.fullOuterJoin("budget", "B", "B.entity = T.entity")` | Add a full outer join. |
+| `crossJoin(source, aliasOrOn?, on?)` | `.crossJoin("calendar", "D")` | Add a cross join. |
+| `joinAs(type, source, aliasOrOn?, on?)` | `.joinAs("LEFT OUTER JOIN", "entity", "E", "E.id = T.entity")` | Add a join with an explicit join type. |
+| `joinRaw(expression)` | `.joinRaw("LEFT JOIN entity E ON E.id = T.entity")` | Add a raw join fragment. |
+
+### Conditions
+
+| Method | Syntax | Output Intent |
+| --- | --- | --- |
+| `where(field, operator, value?)` | `.where("T.entity", "=", param())` | Add an `AND` predicate. |
+| `andWhere(field, operator, value?)` | `.andWhere("T.total", ">", raw("0"))` | Add another `AND` predicate. |
+| `orWhere(field, operator, value?)` | `.orWhere("T.memo", "IS NOT", raw("NULL"))` | Add an `OR` predicate. |
+| `whereRaw(expression)` | `.whereRaw("T.total > 0")` | Add a raw `AND` predicate. |
+| `andWhereRaw(expression)` | `.andWhereRaw("T.status IS NOT NULL")` | Add another raw `AND` predicate. |
+| `orWhereRaw(expression)` | `.orWhereRaw("T.memo IS NOT NULL")` | Add a raw `OR` predicate. |
+| `whereIn(field, values)` | `.whereIn("T.entity", [1, 2, 3])` | Add an `IN (...)` predicate. |
+| `orWhereIn(field, values)` | `.orWhereIn("T.entity", entityQuery)` | Add an `OR ... IN (subquery)` predicate. |
+| `whereNotIn(field, values)` | `.whereNotIn("T.status", ["Closed"])` | Add a `NOT IN (...)` predicate. |
+| `whereBetween(field, start, end)` | `.whereBetween("T.trandate", raw("DATE '2026-01-01'"), raw("DATE '2026-12-31'"))` | Add a `BETWEEN` predicate. |
+| `whereNull(field)` | `.whereNull("T.memo")` | Add an `IS NULL` predicate. |
+| `whereNotNull(field)` | `.whereNotNull("T.memo")` | Add an `IS NOT NULL` predicate. |
+| `exists(query)` | `.exists(lineQuery)` | Add an `EXISTS (subquery)` predicate. |
+| `orExists(query)` | `.orExists(lineQuery)` | Add an `OR EXISTS (subquery)` predicate. |
+| `notExists(query)` | `.notExists(lineQuery)` | Add a `NOT EXISTS (subquery)` predicate. |
+| `orNotExists(query)` | `.orNotExists(lineQuery)` | Add an `OR NOT EXISTS (subquery)` predicate. |
+
+### CTEs, Grouping, Windows, and Ordering
+
+| Method | Syntax | Output Intent |
+| --- | --- | --- |
+| `with(name, query, columns?)` | `.with("totals", totalsQuery)` | Add a CTE. |
+| `withCte(name, query, columns?)` | `.withCte("totals", totalsQuery)` | Add a CTE with explicit naming. |
+| `withRecursive(name, query, columns?)` | `.withRecursive("tree", treeQuery, ["id", "parent_id"])` | Add a recursive CTE marker. |
+| `groupBy(...fields)` | `.groupBy("T.entity", "T.currency")` | Add normal grouping fields. |
+| `rollup(...fields)` | `.rollup("T.entity", "T.currency")` | Add `GROUP BY ROLLUP (...)`. |
+| `cube(...fields)` | `.cube("T.entity", "T.currency")` | Add `GROUP BY CUBE (...)`. |
+| `groupingSets(...sets)` | `.groupingSets(["T.entity", "T.currency"], "T.entity")` | Add `GROUPING SETS (...)`. |
+| `having(field, operator, value?)` | `.having("SUM(T.total)", ">", raw("0"))` | Add a `HAVING` predicate. |
+| `andHaving(field, operator, value?)` | `.andHaving("COUNT(*)", ">", raw("1"))` | Add another `AND` having predicate. |
+| `orHaving(field, operator, value?)` | `.orHaving("COUNT(*)", "=", raw("0"))` | Add an `OR` having predicate. |
+| `havingRaw(expression)` | `.havingRaw("SUM(T.total) > 0")` | Add a raw having predicate. |
+| `orHavingRaw(expression)` | `.orHavingRaw("COUNT(*) = 0")` | Add a raw `OR` having predicate. |
+| `window(name, spec)` | `.window("by_entity", { partitionBy: "T.entity", orderBy: "T.date" })` | Add a named window clause. |
+| `qualify(field, operator, value?)` | `.qualify("rn", "=", raw("1"))` | Add a `QUALIFY` predicate for dialects that support it. |
+| `qualifyRaw(expression)` | `.qualifyRaw("rn = 1")` | Add a raw `QUALIFY` predicate. |
+| `orQualifyRaw(expression)` | `.orQualifyRaw("rank_no <= 10")` | Add a raw `OR` qualify predicate. |
+| `orderBy(...fields)` | `.orderBy("T.trandate DESC")` | Add order expressions. |
+| `orderByColumn(field, direction?, nulls?)` | `.orderByColumn("T.trandate", "DESC", "NULLS LAST")` | Add a structured order expression. |
+
+### Set Operators, Row Limiting, and Final Output
+
+| Method | Syntax | Output Intent |
+| --- | --- | --- |
+| `union(...queries)` | `.union(customers, vendors)` | Combine queries with `UNION`. |
+| `unionAll(...queries)` | `.unionAll(invoices, credits)` | Combine queries with `UNION ALL`. |
+| `intersect(...queries)` | `.intersect(active, selected)` | Combine queries with `INTERSECT`. |
+| `intersectAll(...queries)` | `.intersectAll(active, selected)` | Combine queries with `INTERSECT ALL`. |
+| `minus(...queries)` | `.minus(blocked)` | Combine queries with Oracle `MINUS`. |
+| `minusAll(...queries)` | `.minusAll(blocked)` | Combine queries with `MINUS ALL`. |
+| `except(...queries)` | `.except(blocked)` | Combine queries with `EXCEPT`. |
+| `exceptAll(...queries)` | `.exceptAll(blocked)` | Combine queries with `EXCEPT ALL`. |
+| `setOperator(type, ...queries)` | `.setOperator("UNION ALL", invoices, credits)` | Use any supported set operator directly. |
+| `offset(rows)` | `.offset(20)` | Add `OFFSET n ROWS`. |
+| `fetchFirst(rows, options?)` | `.fetchFirst(10, { withTies: true })` | Add `FETCH FIRST/NEXT n ROWS ...`. |
+| `limit(rows)` | `.limit(10)` | Alias for `fetchFirst(rows)`. |
+| `forUpdate(options?)` | `.forUpdate("OF T.id")` | Add `FOR UPDATE`. |
+| `startWith(expression)` | `.startWith("E.supervisor IS NULL")` | Add Oracle `START WITH`. |
+| `connectBy(expression, nocycle?)` | `.connectBy("PRIOR E.id = E.supervisor")` | Add Oracle `CONNECT BY`. |
+| `clone()` | `.clone()` | Copy the current builder. |
+| `toSuiteQL()` | `.toSuiteQL()` | Render the final SQL string. |
+| `toSQL()` | `.toSQL()` | Render the final SQL string. |
+| `toOracleSQL()` | `.toOracleSQL()` | Render the final SQL string from an Oracle builder. |
+| `toString()` | `.toString()` | Render the final SQL string implicitly. |
+
 ## Basic Query
 
 ```js

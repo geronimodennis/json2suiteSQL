@@ -524,6 +524,74 @@ const sql = jsonToSuiteQL({
 SELECT id, tranid FROM transaction WHERE type = 'CustInvc' UNION ALL SELECT id, tranid FROM transaction WHERE type = 'CustCred'
 ```
 
+## Advanced Read-Only Clauses
+
+The object processor supports additional SELECT-only clauses for SuiteQL and Oracle-style query specifications. It intentionally does not support insert, update, delete, merge, or schema-changing statements.
+
+```js
+const totals = {
+  select: {
+    "T.entity": { as: "entity" },
+    expressionTotal: {
+      expression: "SUM(T.foreigntotal)",
+      as: "total"
+    }
+  },
+  from: {
+    transaction: { as: "T" }
+  },
+  where: {
+    "T.type": {
+      operator: "=",
+      value: "'SalesOrd'"
+    }
+  },
+  groupBy: ["T.entity"],
+  having: {
+    expression: "SUM(T.foreigntotal) > 0"
+  }
+};
+
+const sql = jsonToSuiteQL({
+  with: {
+    entity_totals: totals
+  },
+  distinct: true,
+  select: {
+    "ET.entity": { as: "entity" },
+    "ET.total": { as: "total" },
+    expressionRank: {
+      expression: "RANK()",
+      over: {
+        orderBy: "ET.total DESC"
+      },
+      as: "rankNo"
+    }
+  },
+  from: {
+    entity_totals: { as: "ET" }
+  },
+  orderBy: [
+    {
+      field: "ET.total",
+      direction: "DESC",
+      nulls: "NULLS LAST"
+    }
+  ],
+  offset: 5,
+  fetch: {
+    rows: 10,
+    withTies: true
+  }
+});
+```
+
+```sql
+WITH entity_totals AS (SELECT T.entity as entity, SUM(T.foreigntotal) as total FROM transaction as T WHERE T.type = 'SalesOrd' GROUP BY T.entity HAVING SUM(T.foreigntotal) > 0) SELECT DISTINCT ET.entity as entity, ET.total as total, RANK() OVER (ORDER BY ET.total DESC) as rankNo FROM entity_totals as ET ORDER BY ET.total DESC NULLS LAST OFFSET 5 ROWS FETCH NEXT 10 ROWS WITH TIES
+```
+
+Additional supported read-only set operators include `intersect`, `intersectAll`, `minus`, `minusAll`, `except`, and `exceptAll`.
+
 ## Full Transaction Example
 
 ```js

@@ -1,319 +1,583 @@
 /**
  * Query object accepted by jsonToSuiteQL.
  *
- * Most clauses are plain objects because field, table, expression, and alias
- * names are intentionally supplied by the caller as SuiteQL fragments.
+ * SuiteQL is read-only in this library: the processor renders SELECT query
+ * specifications only. DML and schema-changing statements are intentionally
+ * rejected at the top level.
  */
 export interface JsonToSuiteQLQuery {
-    select?: QueryObject;
-    from?: QueryObject;
-    where?: QueryObject | string;
-    groupBy?: string[];
-    orderBy?: string[];
+    with?: CteInput;
+    distinct?: boolean;
+    all?: boolean;
+    select?: QueryObject | string[] | string;
+    from?: QueryObject | string;
+    where?: ConditionInput;
+    startWith?: ConditionInput;
+    connectBy?: ConditionInput;
+    groupBy?: ClauseListInput;
+    having?: ConditionInput;
+    window?: QueryObject | string[];
+    qualify?: ConditionInput;
+    orderBy?: ClauseListInput;
+    offset?: number | string;
+    fetch?: number | string | FetchInput;
+    limit?: number | string;
     union?: Array<JsonToSuiteQLQuery | string>;
     unionAll?: Array<JsonToSuiteQLQuery | string>;
+    intersect?: Array<JsonToSuiteQLQuery | string>;
+    intersectAll?: Array<JsonToSuiteQLQuery | string>;
+    minus?: Array<JsonToSuiteQLQuery | string>;
+    minusAll?: Array<JsonToSuiteQLQuery | string>;
+    except?: Array<JsonToSuiteQLQuery | string>;
+    exceptAll?: Array<JsonToSuiteQLQuery | string>;
     as?: string;
+    on?: string;
     gate?: string;
     [key: string]: any;
 }
 
 type QueryObject = Record<string, any>;
+type ConditionInput = QueryObject | string | string[];
+type ClauseListInput = string | Array<string | QueryObject> | QueryObject;
+type CteInput = QueryObject | CteItem[];
+
+interface CteItem {
+    name: string;
+    query: JsonToSuiteQLQuery | string;
+    columns?: string[];
+}
+
+interface FetchInput {
+    rows?: number | string;
+    percent?: boolean;
+    withTies?: boolean;
+}
+
+type SetOperator = 'UNION' | 'UNION ALL' | 'INTERSECT' | 'INTERSECT ALL' | 'MINUS' | 'MINUS ALL' | 'EXCEPT' | 'EXCEPT ALL';
+
+const JOIN_TYPES: Record<string, string> = {
+    JOIN: 'LEFT JOIN',
+    PLAINJOIN: 'JOIN',
+    STANDARDJOIN: 'JOIN',
+    LEFTJOIN: 'LEFT JOIN',
+    LEFTOUTERJOIN: 'LEFT OUTER JOIN',
+    RIGHTJOIN: 'RIGHT JOIN',
+    RIGHTOUTERJOIN: 'RIGHT OUTER JOIN',
+    INNERJOIN: 'INNER JOIN',
+    OUTERJOIN: 'OUTER JOIN',
+    FULLJOIN: 'FULL JOIN',
+    FULLOUTERJOIN: 'FULL OUTER JOIN',
+    CROSSJOIN: 'CROSS JOIN',
+    NATURALJOIN: 'NATURAL JOIN'
+};
+
+const READ_ONLY_BLOCKED_KEYS = new Set([
+    'ADD',
+    'ALTER',
+    'CREATE',
+    'DELETE',
+    'DROP',
+    'EDIT',
+    'INSERT',
+    'MERGE',
+    'REMOVE',
+    'TRUNCATE',
+    'UPDATE',
+    'UPSERT'
+]);
 
 export {jsonToSuiteQL};
 
 function jsonToSuiteQL(jsonQuery: JsonToSuiteQLQuery = {}): string {
-    let queryString = [];
+    if (!isObject(jsonQuery)) return '';
 
-    let union = unionProcessor(jsonQuery.union);
-    let unionAll = unionAllProcessor(jsonQuery.unionAll);
+    assertReadOnlyQuery(jsonQuery);
 
-    let select = selectProcessor(jsonQuery.select);
-    let from = fromProcessor(jsonQuery.from);
-    let where = whereProcessor(jsonQuery.where);
-    let groupBy = groupByProcessor(jsonQuery.groupBy);
-    let orderBy = groupByProcessor(jsonQuery.orderBy);
+    const hasSetOperators = hasAnySetOperator(jsonQuery);
+    const withClause = withProcessor(jsonQuery.with);
+    const queryBlock = queryBlockProcessor(jsonQuery, !hasSetOperators);
+    const setQuery = setOperatorProcessor(queryBlock, jsonQuery);
+    const finalClauses = hasSetOperators ? finalClauseProcessor(jsonQuery) : '';
 
-    if (union) {
-        queryString.push(union);
-    }
-
-    if (unionAll) {
-        queryString.push(unionAll);
-    }
-
-    if (select) {
-        queryString.push('SELECT');
-        queryString.push(select);
-    }
-
-    if (from && from.trim()) {
-        queryString.push('FROM');
-        queryString.push(from);
-    }
-
-    if (where) {
-        queryString.push('WHERE');
-        queryString.push(where);
-    }
-
-    if (groupBy) {
-        queryString.push('GROUP BY');
-        queryString.push(groupBy);
-    }
-
-    if (orderBy) {
-        queryString.push('ORDER BY');
-        queryString.push(orderBy);
-    }
-
-    let finalQuery = '';
-    //replace(/\s+/g, ' '); is to remove extra whitespaces in between strings
-    // and replace it with single space ' '
-    if (queryString.length) finalQuery = queryString.join(' ').replace(/\s+/g, ' ').trim();
-
-    return finalQuery;
+    return normalizeWhitespace([withClause, setQuery || queryBlock, finalClauses].filter(Boolean).join(' '));
 }
 
-function selectProcessor(select?: QueryObject): string {
-    if (!select || typeof select !== 'object') return '';
+function queryBlockProcessor(jsonQuery: JsonToSuiteQLQuery, includeFinalClauses: boolean): string {
+    const queryString: string[] = [];
+    const select = selectProcessor(jsonQuery.select, jsonQuery);
+    const from = fromProcessor(jsonQuery.from);
+    const where = conditionProcessor(jsonQuery.where);
+    const startWith = conditionProcessor(jsonQuery.startWith);
+    const connectBy = conditionProcessor(jsonQuery.connectBy);
+    const groupBy = clauseListProcessor(jsonQuery.groupBy);
+    const having = conditionProcessor(jsonQuery.having);
+    const window = windowProcessor(jsonQuery.window);
+    const qualify = conditionProcessor(jsonQuery.qualify);
 
-    let columnCollection = [];
-    const buildColumn = (fieldName: string, relName: string, fieldInfo: any, isExpression = false) => {
-        //if expression dont append the field name
-        let selectCol = isExpression ? [] : [fieldName];
+    if (select) queryString.push('SELECT', select);
+    if (from) queryString.push('FROM', from);
+    if (where) queryString.push('WHERE', where);
+    if (startWith) queryString.push('START WITH', startWith);
+    if (connectBy) queryString.push('CONNECT BY', connectBy);
+    if (groupBy) queryString.push('GROUP BY', groupBy);
+    if (having) queryString.push('HAVING', having);
+    if (window) queryString.push('WINDOW', window);
+    if (qualify) queryString.push('QUALIFY', qualify);
 
-        if (typeof fieldInfo === 'object') {
-            if (relName) selectCol[0] = relName;
-            if (fieldInfo.as) selectCol.push('as ' + fieldInfo.as);
+    if (includeFinalClauses) {
+        const finalClauses = finalClauseProcessor(jsonQuery);
+        if (finalClauses) queryString.push(finalClauses);
+    }
+
+    return queryString.join(' ');
+}
+
+function selectProcessor(select: JsonToSuiteQLQuery['select'], query: JsonToSuiteQLQuery): string {
+    if (!select) return '';
+
+    const modifier = query.distinct ? 'DISTINCT ' : query.all ? 'ALL ' : '';
+
+    if (typeof select === 'string') return modifier + select.trim();
+    if (Array.isArray(select)) return modifier + select.join(', ');
+    if (!isObject(select)) return '';
+
+    const columns = Object.keys(select)
+        .map((fieldName) => selectItemProcessor(fieldName, select[fieldName]))
+        .filter(Boolean);
+
+    return modifier + columns.join(', ');
+}
+
+function selectItemProcessor(fieldName: string, fieldInfo: any): string {
+    const key = normalizeKey(fieldName);
+
+    if (key.startsWith('EXPRESSION')) {
+        return selectExpressionProcessor(fieldName, fieldInfo);
+    }
+
+    if (key.startsWith('SUBQUERY')) {
+        return subqueryExpressionProcessor(fieldInfo);
+    }
+
+    if (isObject(fieldInfo)) {
+        const expression = util_IdentifyObjectRelName(fieldInfo) || fieldName;
+        return renderExpressionWithAlias(renderAnalyticExpression(expression, fieldInfo), fieldInfo.as);
+    }
+
+    if (typeof fieldInfo === 'string') return `${fieldName} ${fieldInfo}`.trim();
+    return fieldName;
+}
+
+function selectExpressionProcessor(fieldName: string, fieldInfo: any): string {
+    if (isObject(fieldInfo)) {
+        const expression = util_IdentifyObjectRelName(fieldInfo) || fieldName;
+        return renderExpressionWithAlias(renderAnalyticExpression(expression, fieldInfo), fieldInfo.as);
+    }
+
+    return String(fieldInfo);
+}
+
+function subqueryExpressionProcessor(fieldInfo: any): string {
+    const query = isObject(fieldInfo) && Object.prototype.hasOwnProperty.call(fieldInfo, 'query') ? fieldInfo.query : fieldInfo;
+    const alias = isObject(fieldInfo) ? fieldInfo.as : '';
+    return renderExpressionWithAlias(`(${renderQueryInput(query)})`, alias);
+}
+
+function renderAnalyticExpression(expression: string, fieldInfo: QueryObject): string {
+    if (!Object.prototype.hasOwnProperty.call(fieldInfo, 'over')) return expression;
+    return `${expression} ${overProcessor(fieldInfo.over)}`;
+}
+
+function fromProcessor(from: JsonToSuiteQLQuery['from']): string {
+    if (!from) return '';
+    if (typeof from === 'string') return from.trim();
+    if (!isObject(from)) return '';
+
+    const tableCollection: string[] = [];
+    const tableJoinCollection: string[] = [];
+
+    for (const tableName in from) {
+        const tableInfo = from[tableName];
+        const key = normalizeKey(tableName);
+
+        if (key.startsWith('EXPRESSION')) {
+            tableCollection.push(isObject(tableInfo) ? util_IdentifyObjectRelName(tableInfo) : String(tableInfo));
+        } else if (key.startsWith('SUBQUERY')) {
+            tableCollection.push(fromSubqueryProcessor(tableInfo));
+        } else if (JOIN_TYPES[key]) {
+            tableJoinCollection.push(...joinProcessor(JOIN_TYPES[key], tableInfo));
+        } else if (isObject(tableInfo)) {
+            const table = [util_IdentifyObjectRelName(tableInfo) || tableName];
+            if (tableInfo.as) table.push('as', tableInfo.as);
+            tableCollection.push(table.join(' '));
+        } else if (typeof tableInfo === 'string') {
+            tableCollection.push(`${tableName} ${tableInfo}`.trim());
         } else {
-            selectCol.push(fieldInfo);
-        }
-
-        return selectCol;
-    };
-
-    for (let fieldName in select) {
-        let fieldInfo = select[fieldName];
-        let key = fieldName.toUpperCase();
-        let relName = util_IdentifyObjectRelName(fieldInfo);
-        if (key.indexOf('EXPRESSION') === 0) {
-            let selectCol = buildColumn(fieldName, relName, fieldInfo, true);
-            columnCollection.push(selectCol.join(' '));
-            //columnCollection.push(fieldInfo);
-        } else if (key.indexOf('SUBQUERY') === 0) {
-            let subQuery = [`(${jsonToSuiteQL(fieldInfo)})`];
-            if (typeof fieldInfo === 'object' && fieldInfo.as) {
-                subQuery.push('as ' + fieldInfo.as);
-            }
-
-            columnCollection.push(subQuery.join(' '));
-        } else {
-            let selectCol = buildColumn(fieldName, relName, fieldInfo);
-            columnCollection.push(selectCol.join(' '));
+            tableCollection.push(tableName);
         }
     }
 
-    return columnCollection.join(',');
+    return [tableCollection.join(', '), tableJoinCollection.join(' ')].filter(Boolean).join(' ');
 }
 
-function fromProcessor(from?: QueryObject): string {
-    if (!from || typeof from !== 'object') return '';
-
-    let tableCollection = [];
-    let tableJoinCollection = [];
-    for (let tableName in from) {
-        let tableInfo = from[tableName];
-        let key = tableName.toUpperCase();
-
-        if (key.indexOf('EXPRESSION') === 0) {
-            tableCollection.push(tableInfo);
-        } else if (key.indexOf('SUBQUERY') === 0) {
-            let table = [];
-            table.push('(' + jsonToSuiteQL(tableInfo) + ')');
-            if (typeof tableInfo === 'object' && tableInfo.as) {
-                table.push('as ' + tableInfo.as);
-            }
-            tableCollection.push(table.join(' '));
-        } else if (
-            key === 'JOIN' ||
-            key === 'LEFTJOIN' ||
-            key === 'RIGHTJOIN' ||
-            key === 'INNERJOIN' ||
-            key === 'OUTERJOIN' ||
-            key === 'CROSSJOIN'
-        ) {
-            tableJoinCollection.push(...joinProcessor(key, tableInfo));
-        } else {
-            let table = [tableName];
-            let relName = util_IdentifyObjectRelName(tableInfo);
-            if (typeof tableInfo === 'object') {
-                if (relName) table[0] = relName;
-                if (tableInfo.as) table.push('as ' + tableInfo.as);
-            } else {
-                //a string value
-                table.push(tableInfo);
-            }
-
-            tableCollection.push(table.join(' '));
-        }
-    }
-
-    return tableCollection.join(', ') + ' ' + tableJoinCollection.join(' ');
+function fromSubqueryProcessor(tableInfo: any): string {
+    const query = isObject(tableInfo) && Object.prototype.hasOwnProperty.call(tableInfo, 'query') ? tableInfo.query : tableInfo;
+    const table = [`(${renderQueryInput(query)})`];
+    if (isObject(tableInfo) && tableInfo.as) table.push('as', tableInfo.as);
+    return table.join(' ');
 }
 
-function joinProcessor(joinType: string, join: QueryObject): string[] {
-    let tableCollection = [];
-    for (let tableName in join) {
-        let tableInfo = join[tableName];
-        let key = tableName.toUpperCase();
+function joinProcessor(joinType: string, join: any): string[] {
+    if (!join) return [];
+    if (typeof join === 'string') return [`${joinType} ${join}`];
+    if (!isObject(join)) return [];
 
-        let joinTypeStr = 'LEFT JOIN';
-        switch (joinType) {
-            case 'JOIN':
-                joinTypeStr = 'LEFT JOIN';
-                break;
-            case 'LEFTJOIN':
-                joinTypeStr = 'LEFT JOIN';
-                break;
-            case 'RIGHTJOIN':
-                joinTypeStr = 'RIGHT JOIN';
-                break;
-            case 'INNERJOIN':
-                joinTypeStr = 'INNER JOIN';
-                break;
-            case 'OUTERJOIN':
-                joinTypeStr = 'OUTER JOIN';
-                break;
-            case 'CROSSJOIN':
-                joinTypeStr = 'CROSS JOIN';
-                break;
-        }
+    const tableCollection: string[] = [];
 
-        if (key.indexOf('EXPRESSION') === 0) {
-            if (typeof tableInfo === 'object') {
-                let table = [joinTypeStr];
-                if (tableInfo.table) table.push(tableInfo.table);
-                if (tableInfo.as) table.push('as ' + tableInfo.as);
-                if (tableInfo.on) table.push('ON ' + tableInfo.on);
-                tableCollection.push(table.join(' '));
-            } else {
-                tableCollection.push(tableInfo);
-            }
-        } else if (key.indexOf('SUBQUERY') === 0) {
-            let table = [joinTypeStr, `(${jsonToSuiteQL(tableInfo)})`];
-            if (tableInfo.as) table.push('as ' + tableInfo.as);
-            if (tableInfo.on) table.push('ON ' + tableInfo.on);
+    for (const tableName in join) {
+        const tableInfo = join[tableName];
+        const key = normalizeKey(tableName);
+
+        if (key.startsWith('EXPRESSION')) {
+            tableCollection.push(joinExpressionProcessor(joinType, tableInfo));
+        } else if (key.startsWith('SUBQUERY')) {
+            tableCollection.push(joinSubqueryProcessor(joinType, tableInfo));
+        } else if (isObject(tableInfo)) {
+            const table = [joinType, util_IdentifyObjectRelName(tableInfo) || tableName];
+            if (tableInfo.as) table.push('as', tableInfo.as);
+            if (tableInfo.on) table.push('ON', tableInfo.on);
+            if (tableInfo.using) table.push('USING', renderUsingClause(tableInfo.using));
             tableCollection.push(table.join(' '));
-        } else {
-            let table = [joinTypeStr];
-            let tblName = util_IdentifyObjectRelName(tableInfo);
-            if (tblName) {
-                table.push(tblName);
-            } else {
-                table.push(tableName);
-            }
-
-            if (tableInfo.as) table.push('as ' + tableInfo.as);
-            if (tableInfo.on) table.push('ON ' + tableInfo.on);
-            tableCollection.push(table.join(' '));
+        } else if (typeof tableInfo === 'string') {
+            tableCollection.push(`${joinType} ${tableName} ${tableInfo}`.trim());
         }
     }
 
     return tableCollection;
 }
 
-function whereProcessor(where?: QueryObject | string): string {
-    if (!where) return '';
+function joinExpressionProcessor(joinType: string, tableInfo: any): string {
+    if (!isObject(tableInfo)) return String(tableInfo);
 
-    let columnConditionCollection = [];
-    let lastGate;
-    if (typeof where === 'string') return `${where} `;
+    const table = [joinType];
+    if (tableInfo.table) table.push(tableInfo.table);
+    if (tableInfo.expression) table.push(tableInfo.expression);
+    if (tableInfo.as) table.push('as', tableInfo.as);
+    if (tableInfo.on) table.push('ON', tableInfo.on);
+    if (tableInfo.using) table.push('USING', renderUsingClause(tableInfo.using));
+    return table.join(' ');
+}
 
-    let existParser = (fieldInfo: any, existClause = 'EXISTS') => {
-        let columnExistConditionCollection = [];
-        if (typeof fieldInfo === 'string') {
-            fieldInfo = fieldInfo.trim();
-            columnExistConditionCollection.push(`${existClause} ${fieldInfo}`);
-        } else {
-            columnExistConditionCollection.push(`${existClause}`);
-            columnExistConditionCollection.push('(' + jsonToSuiteQL(fieldInfo) + ')');
-            if (fieldInfo.gate) {
-                columnExistConditionCollection.push(fieldInfo.gate);
-            }
-        }
+function joinSubqueryProcessor(joinType: string, tableInfo: any): string {
+    const query = isObject(tableInfo) && Object.prototype.hasOwnProperty.call(tableInfo, 'query') ? tableInfo.query : tableInfo;
+    const table = [joinType, `(${renderQueryInput(query)})`];
+    if (isObject(tableInfo) && tableInfo.as) table.push('as', tableInfo.as);
+    if (isObject(tableInfo) && tableInfo.on) table.push('ON', tableInfo.on);
+    if (isObject(tableInfo) && tableInfo.using) table.push('USING', renderUsingClause(tableInfo.using));
+    return table.join(' ');
+}
 
-        return columnExistConditionCollection.join(' ');
-    };
+function conditionProcessor(condition?: ConditionInput): string {
+    if (!condition) return '';
+    if (typeof condition === 'string') return condition.trim();
+    if (Array.isArray(condition)) return condition.join(' ');
+    if (!isObject(condition)) return '';
 
-    for (let fieldName in where) {
-        lastGate = '';
-        let fieldInfo = where[fieldName];
-        let key = fieldName.toUpperCase();
-        if (key.indexOf('EXPRESSION') === 0) {
-            columnConditionCollection.push(fieldInfo);
-        } else if (key.indexOf('SUBQUERY') === 0) {
-            columnConditionCollection.push('(' + jsonToSuiteQL(fieldInfo) + ')');
-        } else if (key.indexOf('EXISTS') === 0) {
-            columnConditionCollection.push(existParser(fieldInfo));
-        } else if (key.indexOf('NOTEXISTS') === 0) {
-            columnConditionCollection.push(existParser(fieldInfo, 'NOT EXISTS'));
-        } else {
-            let relName = util_IdentifyObjectRelName(fieldInfo);
-            let selectCol = [fieldName];
+    return Object.keys(condition)
+        .map((fieldName) => conditionItemProcessor(fieldName, condition[fieldName]))
+        .filter(Boolean)
+        .join(' ');
+}
 
-            if (relName) selectCol[0] = relName;
-            if (fieldInfo.operator) {
-                selectCol.push(fieldInfo.operator);
-            }
-            if (Object.prototype.hasOwnProperty.call(fieldInfo, 'value')) {
-                selectCol.push(fieldInfo.value);
-            }
-            if (fieldInfo.gate) {
-                selectCol.push(fieldInfo.gate);
-                lastGate = fieldInfo.gate;
-            }
-            columnConditionCollection.push(selectCol.join(' '));
-        }
+function conditionItemProcessor(fieldName: string, fieldInfo: any): string {
+    const key = normalizeKey(fieldName);
+
+    if (key.startsWith('EXPRESSION')) return String(fieldInfo);
+    if (key.startsWith('SUBQUERY')) return `(${renderQueryInput(fieldInfo)})`;
+    if (key.startsWith('NOTEXISTS')) return existsProcessor(fieldInfo, 'NOT EXISTS');
+    if (key.startsWith('EXISTS')) return existsProcessor(fieldInfo, 'EXISTS');
+
+    if (!isObject(fieldInfo)) return `${fieldName} ${fieldInfo}`.trim();
+
+    if (fieldInfo.raw) return appendGate(String(fieldInfo.raw), fieldInfo.gate);
+
+    const field = util_IdentifyObjectRelName(fieldInfo) || fieldName;
+    const operator = fieldInfo.operator || fieldInfo.op;
+    const valueExists = Object.prototype.hasOwnProperty.call(fieldInfo, 'value');
+    const condition = operator ? buildPredicate(field, operator, valueExists ? fieldInfo.value : undefined) : field;
+    return appendGate(condition, fieldInfo.gate);
+}
+
+function existsProcessor(fieldInfo: any, existClause: 'EXISTS' | 'NOT EXISTS'): string {
+    const query = isObject(fieldInfo) && Object.prototype.hasOwnProperty.call(fieldInfo, 'query') ? fieldInfo.query : fieldInfo;
+    const rendered = typeof query === 'string' ? query.trim() : `(${renderQueryInput(query)})`;
+    return appendGate(`${existClause} ${rendered}`, isObject(fieldInfo) ? fieldInfo.gate : '');
+}
+
+function buildPredicate(field: string, operator: string, value: any): string {
+    if (value === undefined) return `${field} ${operator}`;
+
+    const normalizedOperator = String(operator).trim().toUpperCase();
+    if (normalizedOperator === 'IN' || normalizedOperator === 'NOT IN') {
+        return `${field} ${operator} ${renderListOrSubquery(value)}`;
     }
 
-    /*const lastGateOnCondition = columnConditionCollection[columnConditionCollection.length-1]
-    if(lastGate){
-    }*/
-    return columnConditionCollection.join(' ');
+    if (normalizedOperator === 'BETWEEN' && Array.isArray(value) && value.length >= 2) {
+        return `${field} BETWEEN ${renderConditionValue(value[0])} AND ${renderConditionValue(value[1])}`;
+    }
+
+    return `${field} ${operator} ${renderConditionValue(value)}`;
 }
 
-function groupByProcessor(groupBy?: string[]): string {
-    if (!Array.isArray(groupBy)) return '';
-    return groupBy.join(', ');
+function clauseListProcessor(input?: ClauseListInput): string {
+    if (!input) return '';
+    if (typeof input === 'string') return input.trim();
+    if (Array.isArray(input)) return input.map(renderClauseListItem).filter(Boolean).join(', ');
+    if (!isObject(input)) return '';
+
+    const clauses: string[] = [];
+
+    if (input.expression) clauses.push(String(input.expression));
+    if (input.rollup) clauses.push(`ROLLUP (${renderClauseList(input.rollup)})`);
+    if (input.cube) clauses.push(`CUBE (${renderClauseList(input.cube)})`);
+    if (input.groupingSets) clauses.push(`GROUPING SETS (${renderGroupingSets(input.groupingSets)})`);
+
+    for (const key in input) {
+        if (['expression', 'rollup', 'cube', 'groupingSets'].includes(key)) continue;
+        const value = input[key];
+        if (isObject(value)) clauses.push(renderOrderByItem(key, value));
+        else if (value) clauses.push(`${key} ${value}`.trim());
+        else clauses.push(key);
+    }
+
+    return clauses.filter(Boolean).join(', ');
 }
 
-function processUnionClause(union: Array<JsonToSuiteQLQuery | string>): string[] {
-    return union.map((unionElement) => {
-        if (typeof unionElement === 'object') {
-            return jsonToSuiteQL(unionElement).trim();
+function renderClauseListItem(item: string | QueryObject): string {
+    if (typeof item === 'string') return item;
+    if (!isObject(item)) return '';
+    if (item.expression) return String(item.expression);
+    if (item.field) return renderOrderByItem(String(item.field), item);
+    return '';
+}
+
+function renderClauseList(input: any): string {
+    if (Array.isArray(input)) return input.map((item) => String(item)).join(', ');
+    return String(input);
+}
+
+function renderGroupingSets(input: any): string {
+    if (!Array.isArray(input)) return String(input);
+    return input
+        .map((set) => (Array.isArray(set) ? `(${set.join(', ')})` : `(${String(set)})`))
+        .join(', ');
+}
+
+function renderOrderByItem(field: string, value: QueryObject): string {
+    const expression = value.expression || value.field || field;
+    return [expression, value.direction, value.nulls].filter(Boolean).join(' ');
+}
+
+function windowProcessor(window?: QueryObject | string[]): string {
+    if (!window) return '';
+    if (Array.isArray(window)) return window.join(', ');
+    if (!isObject(window)) return '';
+
+    return Object.keys(window)
+        .map((name) => `${name} AS (${windowSpecProcessor(window[name])})`)
+        .join(', ');
+}
+
+function windowSpecProcessor(spec: any): string {
+    if (typeof spec === 'string') return spec.trim();
+    if (!isObject(spec)) return '';
+
+    const parts: string[] = [];
+    const partitionBy = spec.partitionBy || spec.partition;
+    const orderBy = spec.orderBy || spec.order;
+
+    if (partitionBy) parts.push('PARTITION BY', renderClauseList(partitionBy));
+    if (orderBy) parts.push('ORDER BY', renderClauseList(orderBy));
+    if (spec.frame) parts.push(spec.frame);
+
+    return parts.join(' ');
+}
+
+function overProcessor(spec: any): string {
+    if (typeof spec === 'string') {
+        const trimmed = spec.trim();
+        if (!trimmed) return 'OVER ()';
+        if (trimmed.toUpperCase().startsWith('OVER ')) return trimmed;
+        if (/^[A-Za-z_][A-Za-z0-9_$#]*$/.test(trimmed)) return `OVER ${trimmed}`;
+        return `OVER (${trimmed})`;
+    }
+
+    return `OVER (${windowSpecProcessor(spec)})`;
+}
+
+function withProcessor(withInput?: CteInput): string {
+    if (!withInput) return '';
+
+    const ctes = Array.isArray(withInput)
+        ? withInput.map((cte) => cteProcessor(cte.name, cte.query, cte.columns))
+        : Object.keys(withInput).map((name) => {
+              const cteInfo = withInput[name];
+              if (isObject(cteInfo) && Object.prototype.hasOwnProperty.call(cteInfo, 'query')) {
+                  return cteProcessor(name, cteInfo.query, cteInfo.columns);
+              }
+              return cteProcessor(name, cteInfo);
+          });
+
+    return ctes.length ? `WITH ${ctes.filter(Boolean).join(', ')}` : '';
+}
+
+function cteProcessor(name: string, query: JsonToSuiteQLQuery | string, columns?: string[]): string {
+    const columnList = Array.isArray(columns) && columns.length ? ` (${columns.join(', ')})` : '';
+    return `${name}${columnList} AS (${renderQueryInput(query)})`;
+}
+
+function finalClauseProcessor(jsonQuery: JsonToSuiteQLQuery): string {
+    const clauses: string[] = [];
+    const orderBy = clauseListProcessor(jsonQuery.orderBy);
+
+    if (orderBy) clauses.push('ORDER BY', orderBy);
+
+    if (jsonQuery.offset !== undefined) {
+        clauses.push('OFFSET', String(jsonQuery.offset), 'ROWS');
+    }
+
+    const fetch = fetchProcessor(jsonQuery.fetch ?? jsonQuery.limit, jsonQuery.offset !== undefined);
+    if (fetch) clauses.push(fetch);
+
+    return clauses.join(' ');
+}
+
+function fetchProcessor(fetch: JsonToSuiteQLQuery['fetch'] | JsonToSuiteQLQuery['limit'], hasOffset: boolean): string {
+    if (fetch === undefined) return '';
+
+    const fetchWord = hasOffset ? 'NEXT' : 'FIRST';
+
+    if (isObject(fetch)) {
+        const rows = fetch.rows ?? 1;
+        const percent = fetch.percent ? ' PERCENT' : '';
+        const suffix = fetch.withTies ? 'WITH TIES' : 'ONLY';
+        return `FETCH ${fetchWord} ${rows}${percent} ROWS ${suffix}`;
+    }
+
+    return `FETCH ${fetchWord} ${fetch} ROWS ONLY`;
+}
+
+function setOperatorProcessor(baseQuery: string, jsonQuery: JsonToSuiteQLQuery): string {
+    const clauses: Array<[SetOperator, Array<JsonToSuiteQLQuery | string> | undefined]> = [
+        ['UNION', jsonQuery.union],
+        ['UNION ALL', jsonQuery.unionAll],
+        ['INTERSECT', jsonQuery.intersect],
+        ['INTERSECT ALL', jsonQuery.intersectAll],
+        ['MINUS', jsonQuery.minus],
+        ['MINUS ALL', jsonQuery.minusAll],
+        ['EXCEPT', jsonQuery.except],
+        ['EXCEPT ALL', jsonQuery.exceptAll]
+    ];
+
+    const renderedClauses: string[] = [];
+
+    for (const [operator, values] of clauses) {
+        if (!Array.isArray(values) || !values.length) continue;
+        const renderedValues = values.map(renderQueryInput).filter(Boolean);
+        if (!renderedClauses.length && !baseQuery) {
+            renderedClauses.push(renderedValues.shift() || '');
         }
-        return unionElement;
-    });
+        renderedClauses.push(...renderedValues.map((value) => `${operator} ${value}`));
+    }
+
+    return [baseQuery, ...renderedClauses].filter(Boolean).join(' ');
 }
 
-function unionProcessor(union?: Array<JsonToSuiteQLQuery | string>): string {
-    if (!Array.isArray(union)) return '';
-    let unionList = processUnionClause(union);
-    return unionList.join(' UNION ');
+function hasAnySetOperator(jsonQuery: JsonToSuiteQLQuery): boolean {
+    return ['union', 'unionAll', 'intersect', 'intersectAll', 'minus', 'minusAll', 'except', 'exceptAll'].some(
+        (key) => Array.isArray(jsonQuery[key]) && jsonQuery[key].length
+    );
 }
 
-function unionAllProcessor(union?: Array<JsonToSuiteQLQuery | string>): string {
-    if (!Array.isArray(union)) return '';
-    let unionList = processUnionClause(union);
+function renderListOrSubquery(value: any): string {
+    if (Array.isArray(value)) return `(${value.map(renderConditionValue).join(', ')})`;
+    if (isObject(value)) {
+        const rawValue = util_IdentifyObjectRelName(value);
+        if (rawValue && !isQueryLikeObject(value)) return rawValue;
+        return `(${jsonToSuiteQL(value)})`;
+    }
+    return String(value);
+}
 
-    return unionList.join(' UNION ALL ');
+function renderConditionValue(value: any): string {
+    if (Array.isArray(value)) return `(${value.map(renderConditionValue).join(', ')})`;
+    if (isObject(value)) {
+        const rawValue = util_IdentifyObjectRelName(value);
+        if (rawValue && !isQueryLikeObject(value)) return rawValue;
+        return `(${jsonToSuiteQL(value)})`;
+    }
+    return String(value);
+}
+
+function renderUsingClause(value: any): string {
+    if (Array.isArray(value)) return `(${value.join(', ')})`;
+    const rendered = String(value).trim();
+    return rendered.startsWith('(') ? rendered : `(${rendered})`;
+}
+
+function renderExpressionWithAlias(expression: string, alias?: string): string {
+    return alias ? `${expression} as ${alias}` : expression;
+}
+
+function renderQueryInput(query: JsonToSuiteQLQuery | string): string {
+    return typeof query === 'string' ? query.trim() : jsonToSuiteQL(query);
+}
+
+function appendGate(condition: string, gate?: string): string {
+    return gate ? `${condition} ${gate}` : condition;
+}
+
+function assertReadOnlyQuery(jsonQuery: JsonToSuiteQLQuery): void {
+    for (const key of Object.keys(jsonQuery)) {
+        if (READ_ONLY_BLOCKED_KEYS.has(normalizeKey(key))) {
+            throw new Error(`SuiteQL is read-only. Unsupported clause "${key}" was provided.`);
+        }
+    }
+}
+
+function normalizeWhitespace(value: string): string {
+    return value.replace(/\s+/g, ' ').trim();
+}
+
+function normalizeKey(value: string): string {
+    return value.replace(/[\s_-]/g, '').toUpperCase();
+}
+
+function isObject(value: any): value is QueryObject {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isQueryLikeObject(value: QueryObject): boolean {
+    return [
+        'select',
+        'from',
+        'where',
+        'groupBy',
+        'having',
+        'orderBy',
+        'union',
+        'unionAll',
+        'intersect',
+        'minus',
+        'except'
+    ].some((key) => Object.prototype.hasOwnProperty.call(value, key));
 }
 
 /**
- *identify relative Name
- * order of priority name, table, field, expression, else if not any return ''
+ * Identify relative name.
+ * Priority: name, table, field, expression.
  */
 function util_IdentifyObjectRelName(obj: any): string {
-    if (!obj || typeof obj !== 'object') return '';
+    if (!isObject(obj)) return '';
     return obj.name || obj.table || obj.field || obj.expression || '';
 }

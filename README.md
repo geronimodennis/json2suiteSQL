@@ -4,6 +4,21 @@ Create SuiteQL strings from JSON-style query objects.
 
 `json2suiteSQL` is a small TypeScript utility for building NetSuite SuiteQL and Oracle-style SQL statements in code without manually concatenating every clause. It includes the original JSON-object processor plus a chainable LINQ-style query builder.
 
+## Why Use This Library?
+
+This library is useful when your application needs to build SuiteQL or Oracle-style SQL dynamically while keeping query construction readable and maintainable.
+
+Key advantages:
+
+- Reduces fragile manual string concatenation for dynamic SQL clauses.
+- Supports both JSON-object query definitions and fluent LINQ-style query building.
+- Makes complex queries easier to compose from reusable pieces such as CTEs, subqueries, joins, and aggregate builders.
+- Covers practical reporting and search scenarios with grouping, ordering, unions, window functions, row limiting, and Oracle-style clauses.
+- Produces plain SQL strings, so the output can be passed to NetSuite SuiteQL APIs, database adapters, logging tools, or tests.
+- Provides minified and unminified JavaScript redistributions plus TypeScript declarations.
+
+It is intentionally lightweight: it builds SQL strings from trusted field, table, and expression fragments that you provide. It does not try to validate your NetSuite schema or replace parameter binding in your execution layer.
+
 ## Installation
 
 Install dependencies before building the redistributable files:
@@ -102,10 +117,16 @@ Supported top-level properties:
 - `select`: fields, expressions, and select subqueries.
 - `from`: tables, raw source expressions, joins, and source subqueries.
 - `where`: a raw condition string or structured condition object.
+- `with`: common table expressions.
+- `distinct` / `all`: select modifiers.
+- `having`: aggregate filters after `GROUP BY`.
+- `window`: named window definitions.
+- `offset`, `fetch`, `limit`: row limiting clauses.
 - `groupBy`: array of SuiteQL fields or expressions.
 - `orderBy`: array of SuiteQL fields or expressions.
 - `union`: array of query objects or raw query strings joined by `UNION`.
 - `unionAll`: array of query objects or raw query strings joined by `UNION ALL`.
+- `intersect`, `minus`, `except`: additional read-only set operators.
 
 ### `suiteQL()` and `oracleSQL()`
 
@@ -127,8 +148,10 @@ The builder supports common SQL query specification clauses:
 
 See [docs/HOW_TO.md](docs/HOW_TO.md) for detailed examples covering each supported query scenario.
 
-For the chainable LINQ-style source version, including Oracle SQL query specification support, CTEs, analytic/window functions, grouping, ordering, set operators, subqueries, and joins, see [docs/QUERY_BUILDER.md](docs/QUERY_BUILDER.md).
+For the chainable LINQ-style source version, including its syntax reference, Oracle SQL query specification support, CTEs, analytic/window functions, grouping, ordering, set operators, subqueries, and joins, see [docs/QUERY_BUILDER.md](docs/QUERY_BUILDER.md).
 
 ## Notes
 
 This library assembles SuiteQL fragments that you provide. It does not validate table names, escape values, or bind parameters. Use `?` placeholders for values that should be bound by the NetSuite API or your database adapter.
+
+SuiteQL is treated as read-only. The object processor rejects top-level DML or schema-changing keys such as `insert`, `update`, `delete`, `merge`, `create`, `alter`, `drop`, and `truncate`.

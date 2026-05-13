@@ -1,6 +1,6 @@
 {
   "name": "json2suitesql",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Create SuiteQL strings from JSON-style query objects.",
   "type": "module",
   "main": "./dist/jsonToQueryProcessor.js",
